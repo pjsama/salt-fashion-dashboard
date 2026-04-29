@@ -154,8 +154,20 @@ def load_data():
         pass
     return load_data_local()
 
-# ── Image helpers ─────────────────────────────────────────────────────────────
+ODOO_URL      = "https://spos.jeevee.com"
 IMAGES_FOLDER = r"C:\Users\Legion\Desktop\odoo_export\product_images"
+
+def get_image_url(product_id):
+    """Load image from Odoo server — works everywhere including Streamlit Cloud"""
+    try:
+        if product_id and str(product_id) not in ("", "nan", "None", "0"):
+            pid = int(float(str(product_id)))
+            if pid > 0:
+                return f"{ODOO_URL}/web/image/product.template/{pid}/image_128"
+    except:
+        pass
+    return None
+
 
 def get_product_image(sku, name):
     if not os.path.exists(IMAGES_FOLDER):
@@ -203,9 +215,24 @@ def product_card(row):
 
     badge_text = f"{emoji} {velocity}" + (f" · {days_label}" if days_label else "")
 
-    img_path = get_product_image(sku, name)
-    if img_path:
-        b64 = img_to_base64(img_path)
+    # Try Odoo server URL first (works on Streamlit Cloud)
+    # Fall back to local images if running locally
+    product_id = row.get("id", row.get("ID", ""))
+    odoo_img   = get_image_url(product_id)
+    local_path = None
+    if os.path.exists(IMAGES_FOLDER):
+        for c in [str(sku).strip(), "".join(ch for ch in str(name) if ch.isalnum() or ch in "-_")[:60]]:
+            if c and c != "nan":
+                p = os.path.join(IMAGES_FOLDER, f"{c}.png")
+                if os.path.exists(p):
+                    local_path = p
+                    break
+
+    if odoo_img:
+        # Use Odoo URL — browser loads it directly, no base64 needed
+        img_html = f'<img class="prod-img" src="{odoo_img}" alt="{name}" loading="lazy"/>' 
+    elif local_path:
+        b64 = img_to_base64(local_path)
         img_html = f'<img class="prod-img" src="data:image/jpeg;base64,{b64}" alt="{name}"/>' \
                    if b64 else '<div class="prod-img-placeholder">👗</div>'
     else:
