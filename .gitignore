@@ -1,0 +1,8 @@
+config.json 
+*.xlsx 
+export_checkpoint.json 
+sync_state.json 
+product_images/ 
+exports/ 
+__pycache__/ 
+*.log 
