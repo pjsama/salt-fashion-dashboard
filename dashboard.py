@@ -118,9 +118,15 @@ def clean_df(df):
         df["STR Status"] = df["STR Status"].fillna("Dead").astype(str).str.strip()
     # Ensure numeric columns
     for col in ["Sales Price","Cost Price","On Hand Qty","Total Units Sold",
-                "Sell-Through %","Revenue","Days of Cover"]:
+                "Revenue","Days of Cover"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    # Sell-Through % — convert from decimal (0.96) to percentage (96.0) if needed
+    if "Sell-Through %" in df.columns:
+        df["Sell-Through %"] = pd.to_numeric(df["Sell-Through %"], errors="coerce").fillna(0)
+        # If max value <= 1.0, it's stored as decimal — multiply by 100
+        if df["Sell-Through %"].max() <= 1.0:
+            df["Sell-Through %"] = df["Sell-Through %"] * 100
     # Ensure string columns
     for col in ["Brand","Category","ABC Class","DOC Status","STR Status",
                 "Product Name","SKU / Internal Ref","Barcode"]:
@@ -208,7 +214,10 @@ def product_card(row):
 def main():
     df, err = load_data()
     if df is None:
-        st.error(f"Could not load data: {err}"); st.stop()
+        st.error(f"Could not load data: {err}")
+        st.info("Check that the Google Drive file is shared with the service account and the File ID is correct.")
+        st.code(f"File ID being used: {GDRIVE_FILE_ID}")
+        st.stop()
     df = clean_df(df)
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
@@ -314,7 +323,7 @@ def main():
     dead     = len(bdf[bdf["STR Status"]=="Dead"])
     rev_tot  = bdf["Revenue"].sum() if "Revenue" in bdf.columns else 0
     abc_a    = len(bdf[bdf["ABC Class"]=="A"]) if "ABC Class" in bdf.columns else 0
-    reorder  = len(bdf[bdf.get("DOC Status","")=="Reorder Now"]) \
+    reorder  = len(bdf[bdf["DOC Status"]=="Reorder Now"]) \
                if "DOC Status" in bdf.columns else 0
 
     st.markdown(f"## {sel_brand or 'All Brands'} — Product Intelligence")
@@ -343,7 +352,7 @@ def main():
     # Insight
     slow_stock = bdf[bdf["STR Status"].isin(["Slow","Dead"])]["On Hand Qty"].sum() \
                  if "On Hand Qty" in bdf.columns else 0
-    reorder_names = bdf[bdf.get("DOC Status","")=="Reorder Now"]["Product Name"].head(3).tolist() \
+    reorder_names = bdf[bdf["DOC Status"]=="Reorder Now"]["Product Name"].head(3).tolist() \
                     if "DOC Status" in bdf.columns else []
     insights = []
     if slow + dead > 0:
