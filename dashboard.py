@@ -394,7 +394,7 @@ def main():
         if ordered: pivot = pivot[ordered]
         pivot["Total"] = pivot.sum(axis=1)
         st.dataframe(pivot.sort_values("Total",ascending=False).head(25),
-                     use_container_width=True)
+                     width='stretch')
 
     # ── ABC Summary ───────────────────────────────────────────────────────────
     if "ABC Class" in f.columns and "Revenue" in f.columns:
@@ -405,7 +405,7 @@ def main():
             Units_Sold=("Total Units Sold","sum"),
             Avg_STR=("Sell-Through %","mean"),
         ).round(1)
-        st.dataframe(abc_sum, use_container_width=True)
+        st.dataframe(abc_sum, width='stretch')
 
 if __name__ == "__main__":
     main()
