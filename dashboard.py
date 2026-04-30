@@ -215,28 +215,41 @@ def product_card(row):
 
     badge_text = f"{emoji} {velocity}" + (f" · {days_label}" if days_label else "")
 
-    # Try Odoo server URL first (works on Streamlit Cloud)
-    # Fall back to local images if running locally
-    product_id = row.get("id", row.get("ID", ""))
-    odoo_img   = get_image_url(product_id)
-    local_path = None
-    if os.path.exists(IMAGES_FOLDER):
+    # Image: try base64 from Excel first (works everywhere including cloud)
+    # Then fall back to local file, then placeholder
+    img_b64_raw = row.get("Image_Base64", "")
+    img_html = None
+
+    # Option 1: base64 stored in Excel column
+    if img_b64_raw and str(img_b64_raw).strip() not in ("", "nan", "None"):
+        try:
+            raw_b64 = str(img_b64_raw).strip()
+            # Decode → resize → re-encode for web
+            raw_bytes = base64.b64decode(raw_b64)
+            img_obj = Image.open(BytesIO(raw_bytes)).convert("RGB")
+            img_obj.thumbnail((300, 300))
+            buf = BytesIO()
+            img_obj.save(buf, format="JPEG", quality=80)
+            web_b64 = base64.b64encode(buf.getvalue()).decode()
+            img_html = f'<img class="prod-img" src="data:image/jpeg;base64,{web_b64}" alt="{name}" loading="lazy"/>' 
+        except:
+            img_html = None
+
+    # Option 2: local image file (when running on your laptop)
+    if not img_html and os.path.exists(IMAGES_FOLDER):
         for c in [str(sku).strip(), "".join(ch for ch in str(name) if ch.isalnum() or ch in "-_")[:60]]:
             if c and c != "nan":
                 p = os.path.join(IMAGES_FOLDER, f"{c}.png")
                 if os.path.exists(p):
-                    local_path = p
+                    b64 = img_to_base64(p)
+                    if b64:
+                        img_html = f'<img class="prod-img" src="data:image/jpeg;base64,{b64}" alt="{name}"/>' 
                     break
 
-    if odoo_img:
-        # Use Odoo URL — browser loads it directly, no base64 needed
-        img_html = f'<img class="prod-img" src="{odoo_img}" alt="{name}" loading="lazy"/>' 
-    elif local_path:
-        b64 = img_to_base64(local_path)
-        img_html = f'<img class="prod-img" src="data:image/jpeg;base64,{b64}" alt="{name}"/>' \
-                   if b64 else '<div class="prod-img-placeholder">👗</div>'
-    else:
+    # Option 3: placeholder
+    if not img_html:
         img_html = '<div class="prod-img-placeholder">👗</div>'
+
 
     price_str   = f"${price:,.2f}"   if isinstance(price,(int,float)) else str(price)
     sold_str    = f"{sold:,.0f} sold"if isinstance(sold,(int,float))  else str(sold)
