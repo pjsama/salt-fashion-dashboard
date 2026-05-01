@@ -38,7 +38,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-GDRIVE_FILE_ID  = "19XKtYaidlt5638bsePjIfacwQ-6MkvlA"
+GDRIVE_FILE_ID  = "11ivu4M2UxqNvG1oKCurqJlaOgqelvBqt"
 IMAGES_FOLDER   = r"C:\Users\Legion\Desktop\odoo_export\product_images"
 
 STR_COLORS = {
