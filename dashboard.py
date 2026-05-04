@@ -38,7 +38,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-GDRIVE_FILE_ID  = "11ivu4M2UxqNvG1oKCurqJlaOgqelvBqt"
+GDRIVE_FILE_ID  = "1EeTULbQ-7Ku2bgTcmsBMcCTkFV96OamG"
 IMAGES_FOLDER   = r"C:\Users\Legion\Desktop\odoo_export\product_images"
 
 STR_COLORS = {
@@ -193,7 +193,7 @@ def product_card(row):
     sold    = row.get("Total Units Sold",0)
     onhand  = row.get("On Hand Qty",0)
     str_s   = str(row.get("STR Status","Dead")).strip()
-    str_pct = row.get("Sell-Through %",0)
+    str_pct = min(float(row.get("Sell-Through %",0) or 0), 100.0)
     abc     = str(row.get("ABC Class","C")).strip()
     doc_s   = str(row.get("DOC Status","N/A")).strip()
     doc_d   = row.get("Days of Cover","")
@@ -209,7 +209,7 @@ def product_card(row):
     price_s   = f"${price:,.0f}"  if isinstance(price,(int,float)) else str(price)
     sold_s    = f"{sold:,.0f}"    if isinstance(sold,(int,float))  else str(sold)
     onhand_s  = f"{onhand:,.0f}"  if isinstance(onhand,(int,float))else str(onhand)
-    str_pct_s = f"{str_pct:.1f}%" if isinstance(str_pct,(int,float))else ""
+    str_pct_s = f"{min(str_pct,100.0):.1f}%" if isinstance(str_pct,(int,float)) else ""
     rev_s     = f"${revenue:,.0f}"if isinstance(revenue,(int,float))else ""
     doc_s2    = f"{int(doc_d)}d"  if doc_d and str(doc_d) not in ("","nan","0","N/A") else ""
     meta      = " · ".join(x for x in [brand,cat] if x and x!="nan")
