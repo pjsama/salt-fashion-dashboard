@@ -395,7 +395,7 @@ def main():
                 top_sf = sf[sf["Status"]=="Super Fast"].sort_values(
                     "Units Sold", ascending=False).head(20)
                 if len(top_sf) > 0:
-                    cols_show = [c for c in ["Product Name","Size","Units Sold","In Stock","STR %","Status"] if c in top_sf.columns]
+                    cols_show = [c for c in ["Product Name","Brand","Category","Size","Units Sold","In Stock","STR %","Status"] if c in top_sf.columns]
                     st.dataframe(top_sf[cols_show], use_container_width=True, hide_index=True)
                 else:
                     st.info("No Super Fast sizes found")
@@ -405,7 +405,7 @@ def main():
                 top_cf = cf[cf["Status"]=="Super Fast"].sort_values(
                     "Units Sold", ascending=False).head(20)
                 if len(top_cf) > 0:
-                    cols_show = [c for c in ["Product Name","Color","Units Sold","In Stock","STR %","Status"] if c in top_cf.columns]
+                    cols_show = [c for c in ["Product Name","Brand","Category","Color","Units Sold","In Stock","STR %","Status"] if c in top_cf.columns]
                     st.dataframe(top_cf[cols_show], use_container_width=True, hide_index=True)
                 else:
                     st.info("No Super Fast colors found")
