@@ -26,7 +26,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── FILE ID — your variant_analysis.xlsx on Google Drive ─────────────────────
-GDRIVE_FILE_ID = "1LMzZJpQZo2NHOqtn4d00RNwBtngA-L9C"
+VARIANT_FILE_ID = "1eUynsHj3U95qJAhuCtfQKDJ7pgrzDmsl"
 # ─────────────────────────────────────────────────────────────────────────────
 
 STR_ORDER  = ["Super Fast","Fast","Medium","Slow","Dead"]
