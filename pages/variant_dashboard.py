@@ -184,6 +184,16 @@ def main():
     size_df.columns  = [c.strip() for c in size_df.columns]
     color_df.columns = [c.strip() for c in color_df.columns]
 
+    # Strip "Size: " and "Color: " prefixes that Odoo adds to attribute values
+    if "Size" in size_df.columns:
+        size_df["Size"] = size_df["Size"].astype(str).str.replace(r"^Size:\s*", "", regex=True).str.strip()
+    if "Color" in color_df.columns:
+        color_df["Color"] = color_df["Color"].astype(str).str.replace(r"^Color:\s*", "", regex=True).str.strip()
+    if "Brand" in size_df.columns:
+        size_df["Brand"] = size_df["Brand"].astype(str).str.replace(r"^Brand:\s*", "", regex=True).str.strip()
+    if "Brand" in color_df.columns:
+        color_df["Brand"] = color_df["Brand"].astype(str).str.replace(r"^Brand:\s*", "", regex=True).str.strip()
+
     # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
         st.markdown("### 📊 Variant Filters")
