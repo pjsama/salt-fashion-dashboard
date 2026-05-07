@@ -190,9 +190,14 @@ def main():
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
         brands = ["All Brands"]
-        if main_df is not None and "Brand" in main_df.columns:
-            brands += sorted([b for b in main_df["Brand"].dropna().unique()
-                              if str(b).strip() not in ("","nan","None","True","False")])
+        # Read brands from variant sheets directly — most reliable
+        for _df in [size_df, color_df]:
+            if "Brand" in _df.columns:
+                _found = sorted([b for b in _df["Brand"].dropna().unique()
+                                 if str(b).strip() not in ("","nan","None","True","False","0")])
+                if _found:
+                    brands = ["All Brands"] + _found
+                    break
         sel_brand = st.selectbox("Brand", brands, index=0)
 
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
@@ -224,6 +229,9 @@ def main():
     # ── Filter ────────────────────────────────────────────────────────────────
     def filter_df(df):
         result = df.copy()
+        # Brand filter — use Brand column directly in variant sheets
+        if sel_brand != "All Brands" and "Brand" in result.columns:
+            result = result[result["Brand"].astype(str).str.strip() == sel_brand]
         if "Status" in result.columns and sel_status:
             result = result[result["Status"].isin(sel_status)]
         if search.strip() and "Product Name" in result.columns:
