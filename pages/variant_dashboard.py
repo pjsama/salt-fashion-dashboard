@@ -27,7 +27,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-GDRIVE_FILE_ID = "1eUynsHj3U95qJAhuCtfQKDJ7pgrzDmsl"
+GDRIVE_FILE_ID = "1LPeoGXDDd3ZAppTiuLskzY4q-71CJWfJ"
 
 STR_COLORS = {
     "Super Fast": ("#1B5E20","#FFFFFF"),
