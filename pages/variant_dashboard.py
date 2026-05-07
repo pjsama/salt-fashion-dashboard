@@ -213,11 +213,16 @@ def main():
 
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
         cats = ["All Categories"]
-        if main_df is not None and "Category" in main_df.columns:
-            bdf = main_df[main_df["Brand"] == sel_brand] \
-                  if sel_brand != "All Brands" else main_df
-            cats += sorted([str(c) for c in bdf["Category"].dropna().unique()
-                           if str(c).strip() not in ("","nan","None")])
+        # Read categories from variant sheets filtered by current brand
+        for _df in [size_df, color_df]:
+            if "Category" in _df.columns:
+                _bdf = _df[_df["Brand"].astype(str).str.strip() == sel_brand] \
+                       if sel_brand != "All Brands" and "Brand" in _df.columns else _df
+                _found = sorted([str(c) for c in _bdf["Category"].dropna().unique()
+                                 if str(c).strip() not in ("","nan","None")])
+                if _found:
+                    cats = ["All Categories"] + _found
+                    break
         sel_cat = st.selectbox("Category", cats, index=0)
 
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
@@ -229,11 +234,16 @@ def main():
     # ── Filter ────────────────────────────────────────────────────────────────
     def filter_df(df):
         result = df.copy()
-        # Brand filter — use Brand column directly in variant sheets
+        # Brand filter
         if sel_brand != "All Brands" and "Brand" in result.columns:
             result = result[result["Brand"].astype(str).str.strip() == sel_brand]
+        # Category filter
+        if sel_cat != "All Categories" and "Category" in result.columns:
+            result = result[result["Category"].astype(str).str.strip() == sel_cat]
+        # STR Status filter
         if "Status" in result.columns and sel_status:
             result = result[result["Status"].isin(sel_status)]
+        # Search
         if search.strip() and "Product Name" in result.columns:
             result = result[result["Product Name"].str.contains(
                 search.strip(), case=False, na=False)]
@@ -244,14 +254,14 @@ def main():
 
     # ── Overall metrics ───────────────────────────────────────────────────────
     if "Units Sold" in size_df.columns and "In Stock" in size_df.columns:
-        total_sold  = size_df["Units Sold"].sum()
-        total_stock = size_df["In Stock"].sum()
+        total_sold  = sf["Units Sold"].sum()
+        total_stock = sf["In Stock"].sum()
         overall_str = calc_str(total_sold, total_stock)
 
-        size_status_counts  = size_df["Status"].value_counts() \
-                              if "Status" in size_df.columns else {}
-        color_status_counts = color_df["Status"].value_counts() \
-                              if "Status" in color_df.columns else {}
+        size_status_counts  = sf["Status"].value_counts() \
+                              if "Status" in sf.columns else {}
+        color_status_counts = cf["Status"].value_counts() \
+                              if "Status" in cf.columns else {}
 
         c1,c2,c3,c4,c5 = st.columns(5)
         for col, val, lbl, clr in [
@@ -372,7 +382,7 @@ def main():
         with col1:
             st.markdown("**🏆 Top 20 Sizes — Super Fast STR**")
             if "Status" in size_df.columns:
-                top_sf = size_df[size_df["Status"]=="Super Fast"].sort_values(
+                top_sf = sf[sf["Status"]=="Super Fast"].sort_values(
                     "Units Sold", ascending=False).head(20)
                 if len(top_sf) > 0:
                     cols_show = [c for c in ["Product Name","Size","Units Sold","In Stock","STR %","Status"] if c in top_sf.columns]
@@ -382,7 +392,7 @@ def main():
         with col2:
             st.markdown("**🏆 Top 20 Colors — Super Fast STR**")
             if "Status" in color_df.columns:
-                top_cf = color_df[color_df["Status"]=="Super Fast"].sort_values(
+                top_cf = cf[cf["Status"]=="Super Fast"].sort_values(
                     "Units Sold", ascending=False).head(20)
                 if len(top_cf) > 0:
                     cols_show = [c for c in ["Product Name","Color","Units Sold","In Stock","STR %","Status"] if c in top_cf.columns]
@@ -395,7 +405,7 @@ def main():
         with col3:
             st.markdown("**🚨 Dead Sizes — Need Clearance**")
             if "Status" in size_df.columns:
-                dead_s = size_df[size_df["Status"]=="Dead"].sort_values(
+                dead_s = sf[sf["Status"]=="Dead"].sort_values(
                     "In Stock", ascending=False).head(20)
                 if len(dead_s) > 0:
                     cols_show = [c for c in ["Product Name","Size","Units Sold","In Stock","STR %"] if c in dead_s.columns]
@@ -403,7 +413,7 @@ def main():
         with col4:
             st.markdown("**🚨 Dead Colors — Need Clearance**")
             if "Status" in color_df.columns:
-                dead_c = color_df[color_df["Status"]=="Dead"].sort_values(
+                dead_c = cf[cf["Status"]=="Dead"].sort_values(
                     "In Stock", ascending=False).head(20)
                 if len(dead_c) > 0:
                     cols_show = [c for c in ["Product Name","Color","Units Sold","In Stock","STR %"] if c in dead_c.columns]
