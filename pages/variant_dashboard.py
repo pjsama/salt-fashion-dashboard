@@ -316,16 +316,19 @@ def main():
             col1, col2 = st.columns([3,2])
             with col1:
                 st.markdown("**Units Sold by Size**")
-                chart_data = size_agg.set_index("Size")["Units_Sold"]
-                ordered = [s for s in SIZE_ORDER if s in chart_data.index]
-                others  = [s for s in chart_data.index if s not in SIZE_ORDER]
-                st.bar_chart(chart_data.reindex(ordered + others).dropna())
+                ordered = [s for s in SIZE_ORDER if s in size_agg["Size"].values]
+                others  = [s for s in size_agg["Size"].values if s not in SIZE_ORDER]
+                sorted_sizes = size_agg.set_index("Size").reindex(ordered + others).dropna().reset_index()
+                st.dataframe(
+                    sorted_sizes[["Size","Units_Sold","In_Stock","STR_%","Status"]].rename(
+                        columns={"Units_Sold":"Units Sold","In_Stock":"In Stock","STR_%":"STR %"}),
+                    use_container_width=True, hide_index=True)
             with col2:
                 st.markdown("**STR % by Size**")
-                str_data = size_agg.set_index("Size")["STR_%"]
-                ordered2 = [s for s in SIZE_ORDER if s in str_data.index]
-                others2  = [s for s in str_data.index if s not in SIZE_ORDER]
-                st.bar_chart(str_data.reindex(ordered2 + others2).dropna())
+                st.dataframe(
+                    size_agg.sort_values("STR_%", ascending=False)[["Size","STR_%","Units_Sold","Status"]].rename(
+                        columns={"STR_%":"STR %","Units_Sold":"Units Sold"}),
+                    use_container_width=True, hide_index=True)
 
             st.markdown("**Size Breakdown Table**")
             display = size_agg[["Size","Units_Sold","In_Stock","STR_%","Status","Products"]].copy()
@@ -358,10 +361,18 @@ def main():
             col1, col2 = st.columns([3,2])
             with col1:
                 st.markdown("**Top 20 Colors by Units Sold**")
-                st.bar_chart(color_agg.head(20).set_index("Color")["Units_Sold"])
+                top20 = color_agg.head(20)
+                st.dataframe(
+                    top20[["Color","Units_Sold","In_Stock","STR_%","Status"]].rename(
+                        columns={"Units_Sold":"Units Sold","In_Stock":"In Stock","STR_%":"STR %"}),
+                    use_container_width=True, hide_index=True)
             with col2:
                 st.markdown("**Top 20 Colors by STR %**")
-                st.bar_chart(color_agg.nlargest(20,"STR_%").set_index("Color")["STR_%"])
+                top20s = color_agg.nlargest(20,"STR_%")
+                st.dataframe(
+                    top20s[["Color","STR_%","Units_Sold","Status"]].rename(
+                        columns={"STR_%":"STR %","Units_Sold":"Units Sold"}),
+                    use_container_width=True, hide_index=True)
 
             st.markdown("**Color Breakdown Table**")
             display = color_agg[["Color","Units_Sold","In_Stock","STR_%","Status","Products"]].copy()
