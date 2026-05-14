@@ -210,19 +210,21 @@ def product_card(row):
         if v and v not in ("nan","","None")
     )
 
-    st.markdown(f"""
-    <div class="prod-card">
-      {img_html}
-      <div class="prod-body">
-        <div class="prod-name" title="{name}">{name}</div>
-        <div class="prod-meta">{meta}</div>
-        {f'<div style="margin-top:3px">{var_badges}</div>' if var_badges else ""}
-        <div class="prod-meta">{price_s} · {sold_s} sold · {onhand_s} stock · {rev_s}</div>
-        <span class="badge" style="background:{str_bg};color:{str_fg}">{str_s} {str_pct_s}</span>
-        <span class="badge" style="background:{abc_bg};color:{abc_fg}">ABC-{abc}</span>
-        <span class="badge" style="background:{doc_bg};color:{doc_fg}">{doc_s} {doc_s2}</span>
-      </div>
-    </div>""", unsafe_allow_html=True)
+    var_div = f'<div style="margin-top:3px">{var_badges}</div>' if var_badges else ""
+    html = (
+        f'<div class="prod-card">'
+        f'{img_html}'
+        f'<div class="prod-body">'
+        f'<div class="prod-name" title="{name}">{name}</div>'
+        f'<div class="prod-meta">{meta}</div>'
+        f'{var_div}'
+        f'<div class="prod-meta">{price_s} · {sold_s} sold · {onhand_s} stock · {rev_s}</div>'
+        f'<span class="badge" style="background:{str_bg};color:{str_fg}">{str_s} {str_pct_s}</span>'
+        f'<span class="badge" style="background:{abc_bg};color:{abc_fg}">ABC-{abc}</span>'
+        f'<span class="badge" style="background:{doc_bg};color:{doc_fg}">{doc_s} {doc_s2}</span>'
+        f'</div></div>'
+    )
+    st.markdown(html, unsafe_allow_html=True)
 
 def main():
     df, err = load_data()
@@ -283,7 +285,7 @@ def main():
             if colors:
                 st.markdown("**Color**")
                 sel_colors = st.multiselect("Colors", options=colors,
-                                            default=[], placeholder="All colors")
+                                            default=[])
             else:
                 sel_colors = []
         else:
@@ -302,7 +304,7 @@ def main():
             if sizes:
                 st.markdown("**Size**")
                 sel_sizes = st.multiselect("Sizes", options=sizes,
-                                           default=[], placeholder="All sizes")
+                                           default=[])
             else:
                 sel_sizes = []
         else:
@@ -411,9 +413,8 @@ def main():
     if rev_tot > 0:
         insights.append(f"Total revenue: <b>${rev_tot:,.0f}</b>")
     if insights:
-        st.markdown(
-            '<div class="insight">💡 ' + " &nbsp;|&nbsp; ".join(insights) + "</div>",
-            unsafe_allow_html=True)
+        insight_html = '<div class="insight">💡 ' + " &nbsp;|&nbsp; ".join(insights) + "</div>"
+        st.markdown(insight_html, unsafe_allow_html=True)
 
     # ── Product grid ──────────────────────────────────────────────────────
     if len(f) == 0:
@@ -444,7 +445,7 @@ def main():
         if ordered: pivot = pivot[ordered]
         pivot["Total"] = pivot.sum(axis=1)
         st.dataframe(pivot.sort_values("Total",ascending=False).head(25),
-                     width='stretch')
+                     use_container_width=True)
 
     # ── Color breakdown (new — variant data only) ─────────────────────────
     if is_variant and "Color" in f.columns:
@@ -456,7 +457,7 @@ def main():
             if ordered2: pivot2 = pivot2[ordered2]
             pivot2["Total"] = pivot2.sum(axis=1)
             st.dataframe(pivot2.sort_values("Total",ascending=False).head(20),
-                         width='stretch')
+                         use_container_width=True)
 
     # ── Size breakdown (new — variant data only) ──────────────────────────
     if is_variant and "Size" in f.columns:
@@ -468,7 +469,7 @@ def main():
             if ordered3: pivot3 = pivot3[ordered3]
             pivot3["Total"] = pivot3.sum(axis=1)
             st.dataframe(pivot3.sort_values("Total",ascending=False).head(20),
-                         width='stretch')
+                         use_container_width=True)
 
     # ── ABC Summary ───────────────────────────────────────────────────────
     if "ABC Class" in f.columns and "Revenue" in f.columns:
@@ -479,7 +480,7 @@ def main():
             Units_Sold=("Total Units Sold","sum"),
             Avg_STR=("Sell-Through %","mean"),
         ).round(1)
-        st.dataframe(abc_sum, width='stretch')
+        st.dataframe(abc_sum, use_container_width=True)
 
 if __name__ == "__main__":
     main()
