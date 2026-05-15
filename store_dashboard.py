@@ -11,7 +11,7 @@ st.set_page_config(
 )
 
 # ── Google Drive loader (reuse pattern from main dashboard) ───────────────────
-GDRIVE_FILE_ID = "1FoCsHv7QJMF0ZKZLnbHOXejdy__eTv8K"
+GDRIVE_FILE_ID = "REPLACE_WITH_STORE_ANALYSIS_FILE_ID"
 
 @st.cache_data(ttl=300)
 def load_from_gdrive(file_id):
@@ -41,7 +41,7 @@ def load_data():
         from googleapiclient.discovery import build
         from googleapiclient.http import MediaIoBaseDownload
 
-        creds_info = json.loads(st.secrets["gcp_service_account"])
+        import json as _j; raw = st.secrets["gcp_service_account"]; creds_info = _j.loads(_j.dumps(dict(raw)))
         creds = Credentials.from_service_account_info(
             creds_info,
             scopes=["https://www.googleapis.com/auth/drive.readonly"]
