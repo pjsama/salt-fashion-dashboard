@@ -11,7 +11,7 @@ st.set_page_config(
 )
 
 # ── Google Drive loader (reuse pattern from main dashboard) ───────────────────
-GDRIVE_FILE_ID = "1FoCsHv7QJMF0ZKZLnbHOXejdy__eTv8K"
+GDRIVE_FILE_ID = "REPLACE_WITH_STORE_ANALYSIS_FILE_ID"
 
 @st.cache_data(ttl=300)
 def load_from_gdrive(file_id):
@@ -149,7 +149,7 @@ avg_aov = total_rev / total_orders if total_orders else 0
 n_stores = len(ov)
 
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("💰 Total Revenue", f"NPR {total_rev/1_000_000:.1f}M" if total_rev >= 1_000_000 else f"NPR {total_rev:,.0f}")
+c1.metric("💰 Total Revenue", f"NPR {total_rev/1_000_000:.1f}M")
 c2.metric("📦 Units Sold", f"{int(total_units):,}")
 c3.metric("🧾 Orders", f"{int(total_orders):,}")
 c4.metric("🛒 Avg Order Value", f"NPR {avg_aov:,.0f}")
@@ -299,21 +299,20 @@ st.subheader("🏢 Brand Split per Building")
 if not df_building.empty:
     bld = df_building.copy()
 
-    # Always ffill Building so every brand row has its building name
-    bld["Building"] = bld["Building"].ffill()
-    bld["Floor"]    = bld["Floor"].fillna("")
+    # ffill Building (stored as UPPERCASE in Excel header rows)
+    bld["Building"] = bld["Building"].ffill().str.title()  # BANESHWOR → Baneshwor
 
-    # Drop the building header rows (they have no Brand)
+    # Drop the building header rows (Brand is None on those rows)
     bld = bld.dropna(subset=["Brand"])
 
     # Filter by building if selected
     if sel_building != "All":
-        bld = bld[bld["Building"].str.upper() == sel_building.upper()]
+        bld = bld[bld["Building"] == sel_building]
 
     bld["Revenue (NPR)"] = bld["Revenue (NPR)"].apply(lambda x: f"NPR {x:,.0f}" if pd.notna(x) else "—")
     bld["Units Sold"]    = bld["Units Sold"].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "—")
     bld["Orders"]        = bld["Orders"].apply(lambda x: f"{int(x):,}" if pd.notna(x) else "—")
     bld["% of Building"] = bld["% of Building"].apply(lambda x: f"{x:.1f}%" if pd.notna(x) else "—")
 
-    st.dataframe(bld[["Building", "Floor", "Brand", "Revenue (NPR)", "Units Sold", "Orders", "% of Building"]],
+    st.dataframe(bld[["Building", "Brand", "Revenue (NPR)", "Units Sold", "Orders", "% of Building"]],
                  use_container_width=True, hide_index=True)
