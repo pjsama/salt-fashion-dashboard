@@ -136,24 +136,57 @@ if sel_building != "All":
 
 # ── Page title ─────────────────────────────────────────────────────────────────
 st.title("🏪 Store Intelligence Dashboard")
+caption_parts = []
 if sel_building != "All":
-    st.caption(f"Filtered: **{sel_building}** · {len(ov)} store(s)")
+    caption_parts.append(f"**{sel_building}**")
+if sel_brand != "All":
+    caption_parts.append(f"**{sel_brand}**")
+if caption_parts:
+    st.caption(f"Filtered: {' · '.join(caption_parts)} · {len(ov)} store(s)")
 else:
     st.caption("All locations · Sep 2024 → May 2026")
 
 # ── Top KPI metrics ────────────────────────────────────────────────────────────
-total_rev  = ov["Total Revenue (NPR)"].sum()
-total_units = ov["Total Units"].sum()
-total_orders = ov["Total Orders"].sum()
-avg_aov = total_rev / total_orders if total_orders else 0
-n_stores = len(ov)
+# If brand filter active, pull revenue from Brand×Store sheet for accuracy
+if sel_brand != "All" and not df_brand_store.empty:
+    bdf_kpi = df_brand_store.copy()
+    bdf_kpi.columns = [str(c) for c in bdf_kpi.columns]
+    brand_col_kpi = bdf_kpi.columns[0]
+    bdf_kpi = bdf_kpi[bdf_kpi[brand_col_kpi] == sel_brand]
+    # Sum all store columns (exclude brand col and TOTAL col)
+    store_cols = [c for c in bdf_kpi.columns if c not in [brand_col_kpi, "TOTAL"]]
+    if sel_building != "All":
+        store_cols = [c for c in store_cols if sel_building.lower() in c.lower()]
+    total_rev = bdf_kpi[store_cols].apply(pd.to_numeric, errors="coerce").sum().sum()
+    total_units = 0
+    total_orders = 0
+    avg_aov = 0
+    n_stores = len(ov)
+else:
+    total_rev   = ov["Total Revenue (NPR)"].sum()
+    total_units = ov["Total Units"].sum()
+    total_orders = ov["Total Orders"].sum()
+    avg_aov = total_rev / total_orders if total_orders else 0
+    n_stores = len(ov)
 
+# Use large styled text instead of st.metric to prevent truncation
 c1, c2, c3, c4, c5 = st.columns(5)
-c1.metric("💰 Total Revenue", f"NPR {total_rev/1_000_000:.1f}M")
-c2.metric("📦 Units Sold", f"{int(total_units):,}")
-c3.metric("🧾 Orders", f"{int(total_orders):,}")
-c4.metric("🛒 Avg Order Value", f"NPR {avg_aov:,.0f}")
-c5.metric("🏪 Stores", n_stores)
+def big_kpi(col, label, value):
+    col.markdown(f"**{label}**")
+    col.markdown(f"### {value}")
+
+big_kpi(c1, "💰 Total Revenue", f"NPR {total_rev/1_000_000:.1f}M" if total_rev >= 1_000_000 else f"NPR {total_rev:,.0f}")
+if total_units:
+    big_kpi(c2, "📦 Units Sold", f"{int(total_units):,}")
+else:
+    big_kpi(c2, "📦 Units Sold", "—")
+if total_orders:
+    big_kpi(c3, "🧾 Orders", f"{int(total_orders):,}")
+    big_kpi(c4, "🛒 Avg Order Value", f"NPR {avg_aov:,.0f}" if avg_aov else "—")
+else:
+    big_kpi(c3, "🧾 Orders", "—")
+    big_kpi(c4, "🛒 Avg Order Value", "—")
+big_kpi(c5, "🏪 Stores", n_stores)
 
 st.markdown("---")
 
