@@ -147,27 +147,32 @@ else:
     st.caption("All locations · Sep 2024 → May 2026")
 
 # ── Top KPI metrics ────────────────────────────────────────────────────────────
-# If brand filter active, pull revenue from Brand×Store sheet for accuracy
+# KPIs always from overview table (per building filter)
+# Brand filter is shown in caption; units/orders not available per-brand in overview
+total_rev    = ov["Total Revenue (NPR)"].sum()
+total_units  = ov["Total Units"].sum()
+total_orders = ov["Total Orders"].sum()
+avg_aov      = total_rev / total_orders if total_orders else 0
+n_stores     = len(ov)
+
+# Override revenue with brand-specific figure if brand selected
 if sel_brand != "All" and not df_brand_store.empty:
     bdf_kpi = df_brand_store.copy()
     bdf_kpi.columns = [str(c) for c in bdf_kpi.columns]
     brand_col_kpi = bdf_kpi.columns[0]
-    bdf_kpi = bdf_kpi[bdf_kpi[brand_col_kpi] == sel_brand]
-    # Sum all store columns (exclude brand col and TOTAL col)
-    store_cols = [c for c in bdf_kpi.columns if c not in [brand_col_kpi, "TOTAL"]]
-    if sel_building != "All":
-        store_cols = [c for c in store_cols if sel_building.lower() in c.lower()]
-    total_rev = bdf_kpi[store_cols].apply(pd.to_numeric, errors="coerce").sum().sum()
-    total_units = 0
-    total_orders = 0
-    avg_aov = 0
-    n_stores = len(ov)
-else:
-    total_rev   = ov["Total Revenue (NPR)"].sum()
-    total_units = ov["Total Units"].sum()
-    total_orders = ov["Total Orders"].sum()
-    avg_aov = total_rev / total_orders if total_orders else 0
-    n_stores = len(ov)
+    row = bdf_kpi[bdf_kpi[brand_col_kpi] == sel_brand]
+    if not row.empty:
+        if sel_building != "All":
+            # find columns that contain the building name (case-insensitive)
+            store_cols = [c for c in bdf_kpi.columns
+                          if c not in [brand_col_kpi, "TOTAL"]
+                          and sel_building.lower() in c.lower()]
+        else:
+            store_cols = [c for c in bdf_kpi.columns if c not in [brand_col_kpi, "TOTAL"]]
+        if store_cols:
+            total_rev = row[store_cols].apply(pd.to_numeric, errors="coerce").sum(axis=1).values[0]
+        else:
+            total_rev = row["TOTAL"].values[0] if "TOTAL" in row.columns else total_rev
 
 # Use large styled text instead of st.metric to prevent truncation
 c1, c2, c3, c4, c5 = st.columns(5)
