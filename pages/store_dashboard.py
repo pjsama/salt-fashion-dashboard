@@ -11,7 +11,7 @@ st.set_page_config(
 )
 
 # ── Google Drive loader (reuse pattern from main dashboard) ───────────────────
-GDRIVE_FILE_ID = "1tVKQbfJBnl2YpMOXmvROCdkJQOTVsSl1e"
+GDRIVE_FILE_ID = "1tVKQbfJBnl2YpMOXmvROCdkJQOTVsSl1"
 
 @st.cache_data(ttl=300)
 def load_from_gdrive(file_id):
