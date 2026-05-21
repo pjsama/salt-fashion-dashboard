@@ -11,7 +11,7 @@ st.set_page_config(
 )
 
 # ── Google Drive loader (reuse pattern from main dashboard) ───────────────────
-GDRIVE_FILE_ID = "1FoCsHv7QJMF0ZKZLnbHOXejdy__eTv8K"
+GDRIVE_FILE_ID = "1tVKQbfJBnl2YpMOXmvROCdkJQOTVsSl1e"
 
 @st.cache_data(ttl=300)
 def load_from_gdrive(file_id):
@@ -84,12 +84,14 @@ sheets = load_data()
 if not sheets:
     st.stop()
 
-df_overview  = sheets.get("📊 Store Overview",  pd.DataFrame())
-df_brand_store = sheets.get("🏷️ Brand × Store", pd.DataFrame())
-df_monthly   = sheets.get("📅 Monthly by Store", pd.DataFrame())
-df_top       = sheets.get("🏆 Top Products by Store", pd.DataFrame())
-df_categ     = sheets.get("🗂️ Category × Store", pd.DataFrame())
-df_building  = sheets.get("🏢 Building Summary", pd.DataFrame())
+df_overview     = sheets.get("📊 Store Overview",       pd.DataFrame())
+df_brand_store  = sheets.get("🏷️ Brand × Store",         pd.DataFrame())
+df_brand_units  = sheets.get("📦 Brand × Store Units",   pd.DataFrame())
+df_brand_orders = sheets.get("🧾 Brand × Store Orders",  pd.DataFrame())
+df_monthly      = sheets.get("📅 Monthly by Store",      pd.DataFrame())
+df_top          = sheets.get("🏆 Top Products by Store", pd.DataFrame())
+df_categ        = sheets.get("🗂️ Category × Store",      pd.DataFrame())
+df_building     = sheets.get("🏢 Building Summary",      pd.DataFrame())
 
 # Clean overview
 df_overview  = df_overview.dropna(subset=["Building"])
@@ -155,24 +157,35 @@ total_orders = ov["Total Orders"].sum()
 avg_aov      = total_rev / total_orders if total_orders else 0
 n_stores     = len(ov)
 
-# Override revenue with brand-specific figure if brand selected
-if sel_brand != "All" and not df_brand_store.empty:
-    bdf_kpi = df_brand_store.copy()
-    bdf_kpi.columns = [str(c) for c in bdf_kpi.columns]
-    brand_col_kpi = bdf_kpi.columns[0]
-    row = bdf_kpi[bdf_kpi[brand_col_kpi] == sel_brand]
-    if not row.empty:
+# Override KPIs with brand-specific figures if brand selected
+if sel_brand != "All":
+    def extract_brand_metric(df_sheet, metric_name):
+        if df_sheet.empty:
+            return None
+        df = df_sheet.copy()
+        df.columns = [str(c) for c in df.columns]
+        bc = df.columns[0]
+        row = df[df[bc] == sel_brand]
+        if row.empty:
+            return None
         if sel_building != "All":
-            # find columns that contain the building name (case-insensitive)
-            store_cols = [c for c in bdf_kpi.columns
-                          if c not in [brand_col_kpi, "TOTAL"]
-                          and sel_building.lower() in c.lower()]
+            cols = [c for c in df.columns if c not in [bc, "TOTAL"] and sel_building.lower() in c.lower()]
         else:
-            store_cols = [c for c in bdf_kpi.columns if c not in [brand_col_kpi, "TOTAL"]]
-        if store_cols:
-            total_rev = row[store_cols].apply(pd.to_numeric, errors="coerce").sum(axis=1).values[0]
-        else:
-            total_rev = row["TOTAL"].values[0] if "TOTAL" in row.columns else total_rev
+            cols = [c for c in df.columns if c not in [bc, "TOTAL"]]
+        if not cols:
+            return row["TOTAL"].values[0] if "TOTAL" in row.columns else None
+        return row[cols].apply(pd.to_numeric, errors="coerce").sum(axis=1).values[0]
+
+    rev_val = extract_brand_metric(df_brand_store, "revenue")
+    if rev_val is not None:
+        total_rev = rev_val
+    units_val = extract_brand_metric(df_brand_units, "units")
+    if units_val is not None:
+        total_units = units_val
+    orders_val = extract_brand_metric(df_brand_orders, "orders")
+    if orders_val is not None:
+        total_orders = orders_val
+        avg_aov = total_rev / total_orders if total_orders else 0
 
 # Use large styled text instead of st.metric to prevent truncation
 c1, c2, c3, c4, c5 = st.columns(5)
