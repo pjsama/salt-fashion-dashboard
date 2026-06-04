@@ -239,6 +239,7 @@ with tab3:
     show_cols = [c for c in ["Date", "Location", "Brand", "Tickets", "Units",
                               "Revenue", "Footfall", "ATV", "UPT"] if c in dff.columns]
     display = dff[show_cols].copy().sort_values(["Date", "Location"], ascending=[False, True])
+    display["Date"] = display["Date"].dt.strftime("%Y-%m-%d")
     display["Revenue"] = display["Revenue"].apply(lambda x: f"NPR {x:,.0f}" if pd.notna(x) else "—")
     display["ATV"]     = display["ATV"].apply(lambda x: f"NPR {x:,.0f}" if pd.notna(x) else "—")
     display["UPT"]     = display["UPT"].apply(lambda x: f"{x:.2f}" if pd.notna(x) else "—")
