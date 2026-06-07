@@ -132,6 +132,10 @@ def clean_df(df):
         if df["Sell-Through %"].max() <= 1.0:
             df["Sell-Through %"] = df["Sell-Through %"] * 100
 
+    # Parse Create Date
+    if "Create Date" in df.columns:
+        df["Create Date"] = pd.to_datetime(df["Create Date"], errors="coerce")
+
     str_cols = ["Brand","Category","ABC Class","DOC Status","STR Status",
                 "Product Name","Barcode","Color","Size","Type",
                 "SKU / Internal Ref","SKU / Variant","Responsible"]
@@ -139,7 +143,6 @@ def clean_df(df):
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
 
-    # Unified SKU column
     if "SKU / Variant" in df.columns and "SKU / Internal Ref" not in df.columns:
         df["SKU / Internal Ref"] = df["SKU / Variant"]
 
@@ -187,6 +190,7 @@ def product_card(row):
     doc_s   = str(row.get("DOC Status","N/A")).strip()
     doc_d   = row.get("Days of Cover","")
     revenue = row.get("Revenue",0)
+    create_date = row.get("Create Date","")
 
     img_html = get_img_html(row, name)
 
@@ -200,9 +204,15 @@ def product_card(row):
     str_pct_s = f"{str_pct:.1f}%"  if isinstance(str_pct,(int,float)) else ""
     rev_s     = f"${revenue:,.0f}" if isinstance(revenue,(int,float)) else ""
     doc_s2    = f"{int(doc_d)}d"   if doc_d and str(doc_d) not in ("","nan","0","N/A") else ""
+
+    # Format create date
+    try:
+        cd_str = pd.Timestamp(create_date).strftime("%b %d, %Y") if pd.notna(create_date) and str(create_date) not in ("","nan","NaT") else ""
+    except:
+        cd_str = ""
+
     meta      = " · ".join(x for x in [brand,cat] if x and x not in ("nan",""))
 
-    # Variant badges (color + size + type)
     var_parts = [(color,"🎨"),(size,"📏"),(vtype,"🔖")]
     var_badges = "".join(
         f'<span class="var-badge">{icon} {v}</span>'
@@ -210,7 +220,9 @@ def product_card(row):
         if v and v not in ("nan","","None")
     )
 
-    var_div = f'<div style="margin-top:3px">{var_badges}</div>' if var_badges else ""
+    var_div  = f'<div style="margin-top:3px">{var_badges}</div>' if var_badges else ""
+    date_div = f'<div class="prod-meta" style="font-size:10px;color:#9CA3AF">📅 Added {cd_str}</div>' if cd_str else ""
+
     html = (
         f'<div class="prod-card">'
         f'{img_html}'
@@ -219,6 +231,7 @@ def product_card(row):
         f'<div class="prod-meta">{meta}</div>'
         f'{var_div}'
         f'<div class="prod-meta">{price_s} · {sold_s} sold · {onhand_s} stock · {rev_s}</div>'
+        f'{date_div}'
         f'<span class="badge" style="background:{str_bg};color:{str_fg}">{str_s} {str_pct_s}</span>'
         f'<span class="badge" style="background:{abc_bg};color:{abc_fg}">ABC-{abc}</span>'
         f'<span class="badge" style="background:{doc_bg};color:{doc_fg}">{doc_s} {doc_s2}</span>'
@@ -230,7 +243,6 @@ def main():
     df, err = load_data()
     if df is None:
         st.error(f"Could not load data: {err}")
-        st.code(f"File ID: {GDRIVE_FILE_ID}")
         st.stop()
     df = clean_df(df)
 
@@ -277,38 +289,58 @@ def main():
 
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-        # Color filter (new — variant level)
+        # Color filter
         if "Color" in df.columns:
             bdf_color = df[df["Brand"]==sel_brand] if sel_brand else df
             colors = sorted([c for c in bdf_color["Color"].unique()
                             if c and c not in ("nan","","None")])
             if colors:
                 st.markdown("**Color**")
-                sel_colors = st.multiselect("Colors", options=colors,
-                                            default=[])
+                sel_colors = st.multiselect("Colors", options=colors, default=[])
             else:
                 sel_colors = []
         else:
             sel_colors = []
 
-        # Size filter (new — variant level)
+        # Size filter
         if "Size" in df.columns:
             bdf_size = df[df["Brand"]==sel_brand] if sel_brand else df
-            from collections import OrderedDict
-            SIZE_ORDER = ["XS","S","M","L","XL","2XL","3XL","4XL","5XL",
+            SIZE_ORDER_F = ["XS","S","M","L","XL","2XL","3XL","4XL","5XL",
                          "Free Size","One Size","26","27","28","29","30",
                          "31","32","33","34","36","38","40","42"]
             sizes_raw = [s for s in bdf_size["Size"].unique()
                         if s and s not in ("nan","","None")]
-            sizes = [s for s in SIZE_ORDER if s in sizes_raw] +                     [s for s in sizes_raw if s not in SIZE_ORDER]
+            sizes = [s for s in SIZE_ORDER_F if s in sizes_raw] + \
+                     [s for s in sizes_raw if s not in SIZE_ORDER_F]
             if sizes:
                 st.markdown("**Size**")
-                sel_sizes = st.multiselect("Sizes", options=sizes,
-                                           default=[])
+                sel_sizes = st.multiselect("Sizes", options=sizes, default=[])
             else:
                 sel_sizes = []
         else:
             sel_sizes = []
+
+        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+        # ── Date filter (NEW) ─────────────────────────────────────────────
+        st.markdown("**📅 Added to Odoo (Date)**")
+        date_options = [
+            "All time",
+            "Last 30 days",
+            "Last 60 days",
+            "Last 90 days",
+            "Older than 30 days  ← exclude new",
+            "Older than 60 days  ← exclude new",
+            "Older than 90 days  ← exclude new",
+            "Custom range",
+        ]
+        sel_date_filter = st.selectbox("Date filter", date_options, index=0,
+            help="Use 'Older than X days' to exclude new arrivals from Dead analysis")
+        custom_date_from = None
+        custom_date_to   = None
+        if sel_date_filter == "Custom range":
+            custom_date_from = st.date_input("From", value=None, key="date_from")
+            custom_date_to   = st.date_input("To",   value=None, key="date_to")
 
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
@@ -318,6 +350,8 @@ def main():
             "Revenue (High)",
             "Total Units Sold (High)",
             "Days of Cover (Low — urgent first)",
+            "Newest first",
+            "Oldest first",
             "Sales Price (High)",
             "Sales Price (Low)",
         ])
@@ -341,6 +375,29 @@ def main():
         f = f[f["Color"].isin(sel_colors)]
     if sel_sizes and "Size" in f.columns:
         f = f[f["Size"].isin(sel_sizes)]
+
+    # Date filter
+    if "Create Date" in f.columns and sel_date_filter != "All time":
+        today = pd.Timestamp.today().normalize()
+        cd = f["Create Date"]
+        if sel_date_filter == "Last 30 days":
+            f = f[cd >= today - pd.Timedelta(days=30)]
+        elif sel_date_filter == "Last 60 days":
+            f = f[cd >= today - pd.Timedelta(days=60)]
+        elif sel_date_filter == "Last 90 days":
+            f = f[cd >= today - pd.Timedelta(days=90)]
+        elif "Older than 30" in sel_date_filter:
+            f = f[cd < today - pd.Timedelta(days=30)]
+        elif "Older than 60" in sel_date_filter:
+            f = f[cd < today - pd.Timedelta(days=60)]
+        elif "Older than 90" in sel_date_filter:
+            f = f[cd < today - pd.Timedelta(days=90)]
+        elif sel_date_filter == "Custom range":
+            if custom_date_from:
+                f = f[cd >= pd.Timestamp(custom_date_from)]
+            if custom_date_to:
+                f = f[cd <= pd.Timestamp(custom_date_to)]
+
     if search.strip():
         f = f[f["Product Name"].str.contains(search.strip(), case=False, na=False)]
 
@@ -354,6 +411,10 @@ def main():
     elif sort_by == "Days of Cover (Low — urgent first)":
         f["_doc"] = pd.to_numeric(f.get("Days of Cover"), errors="coerce")
         f = f.sort_values("_doc", ascending=True)
+    elif sort_by == "Newest first" and "Create Date" in f.columns:
+        f = f.sort_values("Create Date", ascending=False)
+    elif sort_by == "Oldest first" and "Create Date" in f.columns:
+        f = f.sort_values("Create Date", ascending=True)
     elif sort_by == "Sales Price (High)":
         f = f.sort_values("Sales Price", ascending=False)
     elif sort_by == "Sales Price (Low)":
@@ -371,12 +432,14 @@ def main():
     abc_a   = len(bdf[bdf["ABC Class"]=="A"]) if "ABC Class" in bdf.columns else 0
     reorder = len(bdf[bdf["DOC Status"]=="Reorder Now"]) if "DOC Status" in bdf.columns else 0
 
-    # Show whether data is variant-based or template-based
-    is_variant = "Color" in df.columns and df["Color"].notna().any() and                  (df["Color"] != "").any()
+    is_variant = "Color" in df.columns and df["Color"].notna().any() and \
+                 (df["Color"] != "").any()
     data_type  = "variant-level" if is_variant else "product-level"
 
+    # Date filter label for caption
+    date_label = f" · {sel_date_filter}" if sel_date_filter != "All time" else ""
     st.markdown(f"## {sel_brand or 'All Brands'} — Product Intelligence")
-    st.markdown(f"Showing **{len(f):,}** of {total:,} {data_type} records · {sort_by}")
+    st.markdown(f"Showing **{len(f):,}** of {total:,} {data_type} records · {sort_by}{date_label}")
 
     c1,c2,c3,c4,c5,c6,c7,c8 = st.columns(8)
     for col,val,lbl,clr in [
@@ -399,8 +462,10 @@ def main():
     st.markdown("<br>", unsafe_allow_html=True)
 
     # Insight
-    slow_stock = bdf[bdf["STR Status"].isin(["Slow","Dead"])]["On Hand Qty"].sum()                  if "On Hand Qty" in bdf.columns else 0
-    reorder_names = bdf[bdf["DOC Status"]=="Reorder Now"]["Product Name"].head(3).tolist()                     if "DOC Status" in bdf.columns else []
+    slow_stock = bdf[bdf["STR Status"].isin(["Slow","Dead"])]["On Hand Qty"].sum() \
+                 if "On Hand Qty" in bdf.columns else 0
+    reorder_names = bdf[bdf["DOC Status"]=="Reorder Now"]["Product Name"].head(3).tolist() \
+                    if "DOC Status" in bdf.columns else []
     insights = []
     if slow + dead > 0:
         insights.append(
@@ -412,9 +477,11 @@ def main():
             f"<b>🚨 {reorder} variants need reordering</b> (under 14 days cover): {names}...")
     if rev_tot > 0:
         insights.append(f"Total revenue: <b>${rev_tot:,.0f}</b>")
+    if sel_date_filter not in ("All time",) and "Create Date" in df.columns:
+        insights.append(f"📅 Date filter active: <b>{sel_date_filter}</b> — newly added products may be excluded from Dead count")
     if insights:
-        insight_html = '<div class="insight">💡 ' + " &nbsp;|&nbsp; ".join(insights) + "</div>"
-        st.markdown(insight_html, unsafe_allow_html=True)
+        st.markdown('<div class="insight">💡 ' + " &nbsp;|&nbsp; ".join(insights) + "</div>",
+                    unsafe_allow_html=True)
 
     # ── Product grid ──────────────────────────────────────────────────────
     if len(f) == 0:
@@ -447,7 +514,6 @@ def main():
         st.dataframe(pivot.sort_values("Total",ascending=False).head(25),
                      use_container_width=True)
 
-    # ── Color breakdown (new — variant data only) ─────────────────────────
     if is_variant and "Color" in f.columns:
         st.markdown("### Color × STR Breakdown")
         cd2 = f[f["Color"].notna() & (f["Color"]!="")].copy()
@@ -459,7 +525,6 @@ def main():
             st.dataframe(pivot2.sort_values("Total",ascending=False).head(20),
                          use_container_width=True)
 
-    # ── Size breakdown (new — variant data only) ──────────────────────────
     if is_variant and "Size" in f.columns:
         st.markdown("### Size × STR Breakdown")
         sd = f[f["Size"].notna() & (f["Size"]!="")].copy()
@@ -471,7 +536,6 @@ def main():
             st.dataframe(pivot3.sort_values("Total",ascending=False).head(20),
                          use_container_width=True)
 
-    # ── ABC Summary ───────────────────────────────────────────────────────
     if "ABC Class" in f.columns and "Revenue" in f.columns:
         st.markdown("### ABC Revenue Analysis")
         abc_sum = f.groupby("ABC Class").agg(

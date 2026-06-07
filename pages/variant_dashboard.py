@@ -57,12 +57,8 @@ SIZE_ORDER = ["XS","S","M","L","XL","2XL","3XL","4XL","5XL",
               "26","27","28","29","30","31","32","33","34","36","38","40","42"]
 
 
-# ── Load variant Excel from Google Drive ──────────────────────────────────────
 @st.cache_data(ttl=300)
 def load_variant_data():
-    """Load variant_analysis.xlsx — tries Google Drive first, then local."""
-
-    # ── 1. Google Drive (primary — works on Streamlit Cloud) ──────────────
     if "gcp_service_account" in st.secrets:
         try:
             from google.oauth2.service_account import Credentials
@@ -90,7 +86,6 @@ def load_variant_data():
     else:
         gdrive_err = "No GCP secrets configured"
 
-    # ── 2. Local fallback (works on your laptop) ──────────────────────────
     base   = r"C:\Users\Legion\Desktop\odoo_export"
     local  = os.path.join(base, "variant_analysis.xlsx")
     if os.path.exists(local):
@@ -101,18 +96,12 @@ def load_variant_data():
         except Exception as e:
             return None, None, f"Local load failed: {e}"
 
-    return None, None, (
-        f"Could not load variant data.\n"
-        f"Google Drive error: {gdrive_err}\n"
-        f"Local file not found: {local}\n\n"
-        f"Run: python variant_export.py"
-    )
+    return None, None, f"Could not load variant data. Google Drive: {gdrive_err}. Run: python variant_export.py"
 
 
 @st.cache_data(ttl=300)
 def load_main_data():
-    """Load main products Excel for brand/category filter — Google Drive first."""
-    MAIN_FILE_ID = "1kIHUlGCallLjXe9tiBrYDQ16ElQDmLR3"   # same as dashboard.py
+    MAIN_FILE_ID = "1kIHUlGCallLjXe9tiBrYDQ16ElQDmLR3"
 
     if "gcp_service_account" in st.secrets:
         try:
@@ -134,11 +123,13 @@ def load_main_data():
             buf.seek(0)
             df = pd.read_excel(buf, sheet_name="Products", engine="openpyxl")
             df.columns = [c.strip() for c in df.columns]
+            # Parse date
+            if "Create Date" in df.columns:
+                df["Create Date"] = pd.to_datetime(df["Create Date"], errors="coerce")
             return df
         except Exception:
             pass
 
-    # Local fallback
     base = r"C:\Users\Legion\Desktop\odoo_export"
     dirs = [os.path.join(base, "exports"), base]
     candidates = []
@@ -151,6 +142,8 @@ def load_main_data():
     try:
         df = pd.read_excel(latest, sheet_name="Products", engine="openpyxl")
         df.columns = [c.strip() for c in df.columns]
+        if "Create Date" in df.columns:
+            df["Create Date"] = pd.to_datetime(df["Create Date"], errors="coerce")
         return df
     except:
         return None
@@ -169,22 +162,16 @@ def main():
     main_df = load_main_data()
 
     if err or size_df is None:
-        st.error(f"Could not load variant data")
+        st.error("Could not load variant data")
         st.code(err or "Unknown error")
-        st.info("""
-        **To generate variant data:**
-        1. Run: `python variant_export.py` on your laptop
-        2. Upload `variant_analysis.xlsx` to Google Drive (Salt Dashboard Data folder)
-        3. Share it with: `salt-dashboard@salt-dashboard-494810.iam.gserviceaccount.com`
-        4. Refresh this page
-        """)
+        st.info("Run: `python variant_export.py` then upload variant_analysis.xlsx to Google Drive")
         st.stop()
 
     # Clean columns
     size_df.columns  = [c.strip() for c in size_df.columns]
     color_df.columns = [c.strip() for c in color_df.columns]
 
-    # Strip "Size: " and "Color: " prefixes that Odoo adds to attribute values
+    # Strip attribute prefixes
     if "Size" in size_df.columns:
         size_df["Size"] = size_df["Size"].astype(str).str.replace(r"^Size:\s*", "", regex=True).str.strip()
     if "Color" in color_df.columns:
@@ -200,7 +187,6 @@ def main():
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
         brands = ["All Brands"]
-        # Read brands from variant sheets directly — most reliable
         for _df in [size_df, color_df]:
             if "Brand" in _df.columns:
                 _found = sorted([b for b in _df["Brand"].dropna().unique()
@@ -223,7 +209,6 @@ def main():
 
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
         cats = ["All Categories"]
-        # Read categories from variant sheets filtered by current brand
         for _df in [size_df, color_df]:
             if "Category" in _df.columns:
                 _bdf = _df[_df["Brand"].astype(str).str.strip() == sel_brand] \
@@ -236,31 +221,84 @@ def main():
         sel_cat = st.selectbox("Category", cats, index=0)
 
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
+        # ── Date filter (NEW) ─────────────────────────────────────────────
+        st.markdown("**📅 Product Added Date**")
+        date_options = [
+            "All time",
+            "Last 30 days",
+            "Last 60 days",
+            "Last 90 days",
+            "Older than 30 days  ← exclude new",
+            "Older than 60 days  ← exclude new",
+            "Older than 90 days  ← exclude new",
+            "Custom range",
+        ]
+        sel_date_filter = st.selectbox(
+            "Date filter", date_options, index=0,
+            help="Filter by when the product was added to Odoo. Use 'Older than X' to exclude new arrivals from Dead analysis.")
+        custom_date_from = None
+        custom_date_to   = None
+        if sel_date_filter == "Custom range":
+            custom_date_from = st.date_input("From", value=None, key="vdate_from")
+            custom_date_to   = st.date_input("To",   value=None, key="vdate_to")
+
+        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
         search = st.text_input("Search product", placeholder="e.g. Kurti, Jeans...")
 
         if st.button("🔄 Refresh"):
             st.cache_data.clear(); st.rerun()
 
-    # ── Filter ────────────────────────────────────────────────────────────────
+    # ── Build set of product names matching date filter ───────────────────────
+    date_filtered_names = None  # None = no filter
+    if main_df is not None and "Create Date" in main_df.columns and sel_date_filter != "All time":
+        today = pd.Timestamp.today().normalize()
+        cd = main_df["Create Date"]
+        if sel_date_filter == "Last 30 days":
+            mask = cd >= today - pd.Timedelta(days=30)
+        elif sel_date_filter == "Last 60 days":
+            mask = cd >= today - pd.Timedelta(days=60)
+        elif sel_date_filter == "Last 90 days":
+            mask = cd >= today - pd.Timedelta(days=90)
+        elif "Older than 30" in sel_date_filter:
+            mask = cd < today - pd.Timedelta(days=30)
+        elif "Older than 60" in sel_date_filter:
+            mask = cd < today - pd.Timedelta(days=60)
+        elif "Older than 90" in sel_date_filter:
+            mask = cd < today - pd.Timedelta(days=90)
+        elif sel_date_filter == "Custom range":
+            mask = pd.Series([True] * len(main_df), index=main_df.index)
+            if custom_date_from:
+                mask = mask & (cd >= pd.Timestamp(custom_date_from))
+            if custom_date_to:
+                mask = mask & (cd <= pd.Timestamp(custom_date_to))
+        else:
+            mask = pd.Series([True] * len(main_df), index=main_df.index)
+        if "Product Name" in main_df.columns:
+            date_filtered_names = set(main_df[mask]["Product Name"].dropna().tolist())
+
+    # ── Filter helper ─────────────────────────────────────────────────────────
     def filter_df(df):
         result = df.copy()
-        # Brand filter
         if sel_brand != "All Brands" and "Brand" in result.columns:
             result = result[result["Brand"].astype(str).str.strip() == sel_brand]
-        # Category filter
         if sel_cat != "All Categories" and "Category" in result.columns:
             result = result[result["Category"].astype(str).str.strip() == sel_cat]
-        # STR Status filter
         if "Status" in result.columns and sel_status:
             result = result[result["Status"].isin(sel_status)]
-        # Search
         if search.strip() and "Product Name" in result.columns:
             result = result[result["Product Name"].str.contains(
                 search.strip(), case=False, na=False)]
+        # Date filter via product name lookup
+        if date_filtered_names is not None and "Product Name" in result.columns:
+            result = result[result["Product Name"].isin(date_filtered_names)]
         return result
 
     sf = filter_df(size_df)
     cf = filter_df(color_df)
+
+    # Date label for caption
+    date_label = f" · 📅 {sel_date_filter}" if sel_date_filter != "All time" else ""
 
     # ── Overall metrics ───────────────────────────────────────────────────────
     if "Units Sold" in size_df.columns and "In Stock" in size_df.columns:
@@ -272,6 +310,8 @@ def main():
                               if "Status" in sf.columns else {}
         color_status_counts = cf["Status"].value_counts() \
                               if "Status" in cf.columns else {}
+
+        st.caption(f"Filtered: {sel_brand} · {sel_cat}{date_label} · {len(sf):,} size rows · {len(cf):,} color rows")
 
         c1,c2,c3,c4,c5 = st.columns(5)
         for col, val, lbl, clr in [
@@ -309,8 +349,7 @@ def main():
                             if len(size_agg) > 0 else "N/A"
             st.markdown(
                 f'<div class="insight">💡 Best selling size: <strong>{top_size}</strong> '
-                f'by units sold. Best STR: <strong>{best_str_size}</strong>. '
-                f'Use this to decide which sizes to reorder most.</div>',
+                f'by units sold. Best STR: <strong>{best_str_size}</strong>.</div>',
                 unsafe_allow_html=True)
 
             col1, col2 = st.columns([3,2])
@@ -329,11 +368,6 @@ def main():
                     size_agg.sort_values("STR_%", ascending=False)[["Size","STR_%","Units_Sold","Status"]].rename(
                         columns={"STR_%":"STR %","Units_Sold":"Units Sold"}),
                     use_container_width=True, hide_index=True)
-
-            st.markdown("**Size Breakdown Table**")
-            display = size_agg[["Size","Units_Sold","In_Stock","STR_%","Status","Products"]].copy()
-            display.columns = ["Size","Units Sold","In Stock","STR %","Status","Products"]
-            st.dataframe(display, use_container_width=True, hide_index=True)
 
     elif view == "Color Performance":
         st.markdown('<div class="sec-title">🎨 Color Performance</div>',
@@ -354,30 +388,22 @@ def main():
                              if len(color_agg) > 0 else "N/A"
             st.markdown(
                 f'<div class="insight">💡 Best selling color: <strong>{top_color}</strong> '
-                f'by units sold. Best STR: <strong>{best_str_color}</strong>. '
-                f'Focus buying on these colors next season.</div>',
+                f'by units sold. Best STR: <strong>{best_str_color}</strong>.</div>',
                 unsafe_allow_html=True)
 
             col1, col2 = st.columns([3,2])
             with col1:
                 st.markdown("**Top 20 Colors by Units Sold**")
-                top20 = color_agg.head(20)
                 st.dataframe(
-                    top20[["Color","Units_Sold","In_Stock","STR_%","Status"]].rename(
+                    color_agg.head(20)[["Color","Units_Sold","In_Stock","STR_%","Status"]].rename(
                         columns={"Units_Sold":"Units Sold","In_Stock":"In Stock","STR_%":"STR %"}),
                     use_container_width=True, hide_index=True)
             with col2:
                 st.markdown("**Top 20 Colors by STR %**")
-                top20s = color_agg.nlargest(20,"STR_%")
                 st.dataframe(
-                    top20s[["Color","STR_%","Units_Sold","Status"]].rename(
+                    color_agg.nlargest(20,"STR_%")[["Color","STR_%","Units_Sold","Status"]].rename(
                         columns={"STR_%":"STR %","Units_Sold":"Units Sold"}),
                     use_container_width=True, hide_index=True)
-
-            st.markdown("**Color Breakdown Table**")
-            display = color_agg[["Color","Units_Sold","In_Stock","STR_%","Status","Products"]].copy()
-            display.columns = ["Color","Units Sold","In Stock","STR %","Status","Products"]
-            st.dataframe(display, use_container_width=True, hide_index=True)
 
     elif view == "Size × Color Matrix":
         st.markdown('<div class="sec-title">📊 Size × Color Performance Matrix</div>',
@@ -409,7 +435,7 @@ def main():
                     cols_show = [c for c in ["Product Name","Brand","Category","Size","Units Sold","In Stock","STR %","Status"] if c in top_sf.columns]
                     st.dataframe(top_sf[cols_show], use_container_width=True, hide_index=True)
                 else:
-                    st.info("No Super Fast sizes found")
+                    st.info("No Super Fast sizes in current filter")
         with col2:
             st.markdown("**🏆 Top 20 Colors — Super Fast STR**")
             if "Status" in color_df.columns:
@@ -419,7 +445,7 @@ def main():
                     cols_show = [c for c in ["Product Name","Brand","Category","Color","Units Sold","In Stock","STR %","Status"] if c in top_cf.columns]
                     st.dataframe(top_cf[cols_show], use_container_width=True, hide_index=True)
                 else:
-                    st.info("No Super Fast colors found")
+                    st.info("No Super Fast colors in current filter")
 
         st.markdown("---")
         col3, col4 = st.columns(2)
