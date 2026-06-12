@@ -34,6 +34,9 @@ st.markdown("""
 .var-badge{display:inline-block;padding:1px 7px;border-radius:8px;
            font-size:10px;font-weight:600;margin-top:3px;margin-right:2px;
            background:#F3F4F6;color:#374151;border:1px solid #E5E7EB}
+.sub-badge{display:inline-block;padding:1px 7px;border-radius:8px;
+           font-size:10px;font-weight:500;margin-top:3px;margin-right:2px;
+           background:#EFF6FF;color:#1D4ED8;border:1px solid #BFDBFE}
 .divider{border-top:1px solid #e5e7eb;margin:12px 0}
 .insight{background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;
          padding:10px 14px;font-size:13px;color:#1e40af;margin-bottom:14px}
@@ -62,6 +65,24 @@ DOC_COLORS = {
     "N/A":         ("#9E9E9E","#FFFFFF"),
 }
 STR_ORDER = ["Super Fast","Fast","Medium","Slow","Dead"]
+
+# ── Odoo internal path segments to skip ──────────────────────────────────────
+SKIP_PARTS = {"All","Saleable","PoS",""}
+
+def split_odoo_category(raw):
+    """
+    'Jacket / Fur Regular'  -> ('Jacket', 'Fur Regular')
+    'Denim Pant / Baggy'    -> ('Denim Pant', 'Baggy')
+    'Knitted'               -> ('Knitted', '')
+    'All / Saleable / PoS'  -> ('', '')   filtered as internal
+    """
+    parts = [p.strip() for p in str(raw).split("/")]
+    parts = [p for p in parts if p and p not in SKIP_PARTS]
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    return parts[-2], parts[-1]   # parent, sub
 
 @st.cache_data(ttl=300)
 def load_from_gdrive(file_id):
@@ -132,7 +153,6 @@ def clean_df(df):
         if df["Sell-Through %"].max() <= 1.0:
             df["Sell-Through %"] = df["Sell-Through %"] * 100
 
-    # Parse Create Date
     if "Create Date" in df.columns:
         df["Create Date"] = pd.to_datetime(df["Create Date"], errors="coerce")
 
@@ -145,6 +165,18 @@ def clean_df(df):
 
     if "SKU / Variant" in df.columns and "SKU / Internal Ref" not in df.columns:
         df["SKU / Internal Ref"] = df["SKU / Variant"]
+
+    # ── Fix Category: split 'Jacket / Fur Regular' into parent + sub ─────────
+    # If Sub Category column doesn't exist OR Category still has slashes, split now
+    has_sub = "Sub Category" in df.columns
+    has_slashes = df["Category"].str.contains("/", na=False).any() if "Category" in df.columns else False
+
+    if "Category" in df.columns and (not has_sub or has_slashes):
+        split = df["Category"].apply(split_odoo_category)
+        df["Category"]     = split.apply(lambda x: x[0])
+        df["Sub Category"] = split.apply(lambda x: x[1])
+    elif not has_sub:
+        df["Sub Category"] = ""
 
     return df
 
@@ -178,6 +210,7 @@ def product_card(row):
     name    = str(row.get("Product Name","")).strip() or "—"
     brand   = str(row.get("Brand","")).strip()
     cat     = str(row.get("Category","")).strip()
+    sub_cat = str(row.get("Sub Category","")).strip()
     color   = str(row.get("Color","")).strip()
     size    = str(row.get("Size","")).strip()
     vtype   = str(row.get("Type","")).strip()
@@ -198,24 +231,23 @@ def product_card(row):
     abc_bg,abc_fg = ABC_COLORS.get(abc,  ("#757575","#FFFFFF"))
     doc_bg,doc_fg = DOC_COLORS.get(doc_s,("#9E9E9E","#FFFFFF"))
 
-    price_s   = f"${price:,.0f}"   if isinstance(price,(int,float))  else str(price)
-    sold_s    = f"{sold:,.0f}"     if isinstance(sold,(int,float))   else str(sold)
-    onhand_s  = f"{onhand:,.0f}"   if isinstance(onhand,(int,float)) else str(onhand)
-    str_pct_s = f"{str_pct:.1f}%"  if isinstance(str_pct,(int,float)) else ""
-    rev_s     = f"${revenue:,.0f}" if isinstance(revenue,(int,float)) else ""
-    doc_s2    = f"{int(doc_d)}d"   if doc_d and str(doc_d) not in ("","nan","0","N/A") else ""
+    price_s   = f"NPR {price:,.0f}"  if isinstance(price,(int,float)) else str(price)
+    sold_s    = f"{sold:,.0f}"       if isinstance(sold,(int,float))  else str(sold)
+    onhand_s  = f"{onhand:,.0f}"     if isinstance(onhand,(int,float)) else str(onhand)
+    str_pct_s = f"{str_pct:.1f}%"   if isinstance(str_pct,(int,float)) else ""
+    rev_s     = f"NPR {revenue:,.0f}" if isinstance(revenue,(int,float)) else ""
+    doc_s2    = f"{int(doc_d)}d"     if doc_d and str(doc_d) not in ("","nan","0","N/A") else ""
 
-    # Format create date
     try:
         cd_str = pd.Timestamp(create_date).strftime("%b %d, %Y") if pd.notna(create_date) and str(create_date) not in ("","nan","NaT") else ""
     except:
         cd_str = ""
 
-    sub_cat   = str(row.get("Sub Category","")).strip()
-    sub_cat   = str(row.get("Sub Category","")).strip()
-    meta      = " · ".join(x for x in [brand,cat] if x and x not in ("nan",""))
-    sub_meta  = sub_cat if sub_cat and sub_cat not in ("nan","") else ""
-    sub_meta  = sub_cat if sub_cat and sub_cat not in ("nan","") else ""
+    # Category line: show parent · sub if sub exists
+    cat_display = cat
+    if sub_cat and sub_cat not in ("nan","","None"):
+        cat_display = f"{cat} · {sub_cat}"
+    meta = " · ".join(x for x in [brand, cat_display] if x and x not in ("nan",""))
 
     var_parts = [(color,"🎨"),(size,"📏"),(vtype,"🔖")]
     var_badges = "".join(
@@ -233,8 +265,6 @@ def product_card(row):
         f'<div class="prod-body">'
         f'<div class="prod-name" title="{name}">{name}</div>'
         f'<div class="prod-meta">{meta}</div>'
-        f'<div class="prod-meta" style="font-size:10px;color:#9CA3AF">{sub_meta}</div>' if sub_meta else '',
-        f'<div class="prod-meta" style="font-size:10px;color:#9CA3AF">{sub_meta}</div>' if sub_meta else '',
         f'{var_div}'
         f'<div class="prod-meta">{price_s} · {sold_s} sold · {onhand_s} stock · {rev_s}</div>'
         f'{date_div}'
@@ -257,7 +287,6 @@ def main():
         st.markdown("**Intelligence Dashboard**")
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-        # Brand
         df["Brand"] = df["Brand"].fillna("").astype(str).str.strip()
         brands = sorted([b for b in df["Brand"].unique()
                          if b and b not in ("nan","True","False","None","")])
@@ -265,7 +294,6 @@ def main():
 
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-        # STR filter
         st.markdown("**Sell-Through Filter**")
         all_strs = [s for s in STR_ORDER if s in df["STR Status"].unique()]
         sel_strs = []
@@ -276,7 +304,6 @@ def main():
 
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-        # ABC filter
         st.markdown("**ABC Class**")
         sel_abc = []
         bdf_tmp = df[df["Brand"]==sel_brand] if sel_brand else df
@@ -287,43 +314,24 @@ def main():
 
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-        # Category
+        # ── Category filter: parent categories only ───────────────────────
         bdf_cats = df[df["Brand"]==sel_brand] if sel_brand else df
-        cats = sorted([str(c) for c in bdf_cats["Category"].unique()
-                       if str(c).strip() not in ("nan","True","False","None","")])
-        sel_cats = st.multiselect("Category", options=cats, default=cats)
+        parent_cats = sorted([str(c) for c in bdf_cats["Category"].unique()
+                              if str(c).strip() not in ("nan","True","False","None","")])
+        sel_cats = st.multiselect("Category (Parent)", options=parent_cats, default=parent_cats,
+                                  help="These are the main categories e.g. Jacket, Denim Pant, Shirt")
 
-        # Sub Category filter
-        if "Sub Category" in df.columns:
-            bdf_subcats = df[df["Brand"]==sel_brand] if sel_brand else df
-            if sel_cats:
-                bdf_subcats = bdf_subcats[bdf_subcats["Category"].isin(sel_cats)]
-            subcats = sorted([str(c) for c in bdf_subcats["Sub Category"].unique()
-                             if str(c).strip() not in ("nan","True","False","None","")])
-            if subcats:
-                sel_subcats = st.multiselect("Sub Category", options=subcats, default=[])
-            else:
-                sel_subcats = []
-        else:
-            sel_subcats = []
-
-        # Sub Category filter
-        if "Sub Category" in df.columns:
-            bdf_subcats = df[df["Brand"]==sel_brand] if sel_brand else df
-            if sel_cats:
-                bdf_subcats = bdf_subcats[bdf_subcats["Category"].isin(sel_cats)]
-            subcats = sorted([str(c) for c in bdf_subcats["Sub Category"].unique()
-                             if str(c).strip() not in ("nan","True","False","None","")])
-            if subcats:
-                sel_subcats = st.multiselect("Sub Category", options=subcats, default=[])
-            else:
-                sel_subcats = []
-        else:
-            sel_subcats = []
+        # Sub category filter (optional — only shown if parent selected)
+        sel_sub_cats = []
+        if sel_cats and len(sel_cats) < len(parent_cats):
+            sub_options = sorted([str(c) for c in bdf_cats[bdf_cats["Category"].isin(sel_cats)]["Sub Category"].unique()
+                                  if str(c).strip() not in ("nan","","None")])
+            if sub_options:
+                sel_sub_cats = st.multiselect("Sub Category", options=sub_options, default=[],
+                                              help="Refine within the selected parent categories")
 
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-        # Color filter
         if "Color" in df.columns:
             bdf_color = df[df["Brand"]==sel_brand] if sel_brand else df
             colors = sorted([c for c in bdf_color["Color"].unique()
@@ -336,7 +344,6 @@ def main():
         else:
             sel_colors = []
 
-        # Size filter
         if "Size" in df.columns:
             bdf_size = df[df["Brand"]==sel_brand] if sel_brand else df
             SIZE_ORDER_F = ["XS","S","M","L","XL","2XL","3XL","4XL","5XL",
@@ -356,7 +363,6 @@ def main():
 
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
-        # ── Date filter (NEW) ─────────────────────────────────────────────
         st.markdown("**📅 Added to Odoo (Date)**")
         date_options = [
             "All time",
@@ -405,16 +411,13 @@ def main():
         f = f[f["ABC Class"].isin(sel_abc)]
     if sel_cats:
         f = f[f["Category"].astype(str).isin(sel_cats)]
-    if sel_subcats and "Sub Category" in f.columns:
-        f = f[f["Sub Category"].astype(str).isin(sel_subcats)]
-    if sel_subcats and "Sub Category" in f.columns:
-        f = f[f["Sub Category"].astype(str).isin(sel_subcats)]
+    if sel_sub_cats and "Sub Category" in f.columns:
+        f = f[f["Sub Category"].astype(str).isin(sel_sub_cats)]
     if sel_colors and "Color" in f.columns:
         f = f[f["Color"].isin(sel_colors)]
     if sel_sizes and "Size" in f.columns:
         f = f[f["Size"].isin(sel_sizes)]
 
-    # Date filter
     if "Create Date" in f.columns and sel_date_filter != "All time":
         today = pd.Timestamp.today().normalize()
         cd = f["Create Date"]
@@ -474,7 +477,6 @@ def main():
                  (df["Color"] != "").any()
     data_type  = "variant-level" if is_variant else "product-level"
 
-    # Date filter label for caption
     date_label = f" · {sel_date_filter}" if sel_date_filter != "All time" else ""
     st.markdown(f"## {sel_brand or 'All Brands'} — Product Intelligence")
     st.markdown(f"Showing **{len(f):,}** of {total:,} {data_type} records · {sort_by}{date_label}")
@@ -514,9 +516,9 @@ def main():
         insights.append(
             f"<b>🚨 {reorder} variants need reordering</b> (under 14 days cover): {names}...")
     if rev_tot > 0:
-        insights.append(f"Total revenue: <b>${rev_tot:,.0f}</b>")
+        insights.append(f"Total revenue: <b>NPR {rev_tot:,.0f}</b>")
     if sel_date_filter not in ("All time",) and "Create Date" in df.columns:
-        insights.append(f"📅 Date filter active: <b>{sel_date_filter}</b> — newly added products may be excluded from Dead count")
+        insights.append(f"📅 Date filter: <b>{sel_date_filter}</b>")
     if insights:
         st.markdown('<div class="insight">💡 ' + " &nbsp;|&nbsp; ".join(insights) + "</div>",
                     unsafe_allow_html=True)
@@ -539,24 +541,32 @@ def main():
                 with cols[c]:
                     product_card(pf.iloc[idx])
 
-    # ── Category breakdown ────────────────────────────────────────────────
+    # ── Category breakdown — grouped by parent ────────────────────────────
     st.markdown("---")
     st.markdown("### Category Breakdown")
     if "STR Status" in f.columns and "Category" in f.columns:
         cd = f.copy()
         cd["Category"] = cd["Category"].fillna("—").astype(str).str.strip()
-        if "Sub Category" in cd.columns:
-            cd["Category Display"] = cd.apply(
-                lambda r: f"{r['Category']} · {r['Sub Category']}" if r.get("Sub Category","") not in ("","nan") else r["Category"],
-                axis=1)
-        else:
-            cd["Category Display"] = cd["Category"]
-        pivot = cd.groupby(["Category Display","STR Status"]).size().unstack(fill_value=0)
+        pivot = cd.groupby(["Category","STR Status"]).size().unstack(fill_value=0)
         ordered = [s for s in STR_ORDER if s in pivot.columns]
         if ordered: pivot = pivot[ordered]
         pivot["Total"] = pivot.sum(axis=1)
-        st.dataframe(pivot.sort_values("Total",ascending=False).head(40),
+        st.dataframe(pivot.sort_values("Total",ascending=False).head(30),
                      use_container_width=True)
+
+    # Sub category breakdown (only when a specific parent is filtered)
+    if sel_cats and len(sel_cats) <= 3 and "Sub Category" in f.columns:
+        sub_vals = f["Sub Category"].dropna()
+        sub_vals = sub_vals[sub_vals.astype(str).str.strip().ne("")]
+        if len(sub_vals) > 0:
+            st.markdown("### Sub Category Breakdown")
+            pivot_s = f[f["Sub Category"].astype(str).str.strip().ne("")].groupby(
+                ["Sub Category","STR Status"]).size().unstack(fill_value=0)
+            ordered_s = [s for s in STR_ORDER if s in pivot_s.columns]
+            if ordered_s: pivot_s = pivot_s[ordered_s]
+            pivot_s["Total"] = pivot_s.sum(axis=1)
+            st.dataframe(pivot_s.sort_values("Total",ascending=False).head(20),
+                         use_container_width=True)
 
     if is_variant and "Color" in f.columns:
         st.markdown("### Color × STR Breakdown")
