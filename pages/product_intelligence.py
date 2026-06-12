@@ -66,6 +66,15 @@ DOC_COLORS = {
 }
 STR_ORDER = ["Super Fast","Fast","Medium","Slow","Dead"]
 
+SKIP_PARTS = {"All","Saleable","PoS",""}
+
+def split_odoo_category(raw):
+    parts = [p.strip() for p in str(raw).split("/")]
+    parts = [p for p in parts if p and p not in SKIP_PARTS]
+    if not parts: return "", ""
+    if len(parts) == 1: return parts[0], ""
+    return parts[-2], parts[-1]
+
 # ── Odoo internal path segments to skip ──────────────────────────────────────
 SKIP_PARTS = {"All","Saleable","PoS",""}
 
