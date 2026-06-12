@@ -136,7 +136,7 @@ def clean_df(df):
     if "Create Date" in df.columns:
         df["Create Date"] = pd.to_datetime(df["Create Date"], errors="coerce")
 
-    str_cols = ["Brand","Category","ABC Class","DOC Status","STR Status",
+    str_cols = ["Brand","Category","Sub Category","ABC Class","DOC Status","STR Status",
                 "Product Name","Barcode","Color","Size","Type",
                 "SKU / Internal Ref","SKU / Variant","Responsible"]
     for col in str_cols:
@@ -211,7 +211,11 @@ def product_card(row):
     except:
         cd_str = ""
 
+    sub_cat   = str(row.get("Sub Category","")).strip()
+    sub_cat   = str(row.get("Sub Category","")).strip()
     meta      = " · ".join(x for x in [brand,cat] if x and x not in ("nan",""))
+    sub_meta  = sub_cat if sub_cat and sub_cat not in ("nan","") else ""
+    sub_meta  = sub_cat if sub_cat and sub_cat not in ("nan","") else ""
 
     var_parts = [(color,"🎨"),(size,"📏"),(vtype,"🔖")]
     var_badges = "".join(
@@ -229,6 +233,8 @@ def product_card(row):
         f'<div class="prod-body">'
         f'<div class="prod-name" title="{name}">{name}</div>'
         f'<div class="prod-meta">{meta}</div>'
+        f'<div class="prod-meta" style="font-size:10px;color:#9CA3AF">{sub_meta}</div>' if sub_meta else '',
+        f'<div class="prod-meta" style="font-size:10px;color:#9CA3AF">{sub_meta}</div>' if sub_meta else '',
         f'{var_div}'
         f'<div class="prod-meta">{price_s} · {sold_s} sold · {onhand_s} stock · {rev_s}</div>'
         f'{date_div}'
@@ -286,6 +292,34 @@ def main():
         cats = sorted([str(c) for c in bdf_cats["Category"].unique()
                        if str(c).strip() not in ("nan","True","False","None","")])
         sel_cats = st.multiselect("Category", options=cats, default=cats)
+
+        # Sub Category filter
+        if "Sub Category" in df.columns:
+            bdf_subcats = df[df["Brand"]==sel_brand] if sel_brand else df
+            if sel_cats:
+                bdf_subcats = bdf_subcats[bdf_subcats["Category"].isin(sel_cats)]
+            subcats = sorted([str(c) for c in bdf_subcats["Sub Category"].unique()
+                             if str(c).strip() not in ("nan","True","False","None","")])
+            if subcats:
+                sel_subcats = st.multiselect("Sub Category", options=subcats, default=[])
+            else:
+                sel_subcats = []
+        else:
+            sel_subcats = []
+
+        # Sub Category filter
+        if "Sub Category" in df.columns:
+            bdf_subcats = df[df["Brand"]==sel_brand] if sel_brand else df
+            if sel_cats:
+                bdf_subcats = bdf_subcats[bdf_subcats["Category"].isin(sel_cats)]
+            subcats = sorted([str(c) for c in bdf_subcats["Sub Category"].unique()
+                             if str(c).strip() not in ("nan","True","False","None","")])
+            if subcats:
+                sel_subcats = st.multiselect("Sub Category", options=subcats, default=[])
+            else:
+                sel_subcats = []
+        else:
+            sel_subcats = []
 
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
@@ -371,6 +405,10 @@ def main():
         f = f[f["ABC Class"].isin(sel_abc)]
     if sel_cats:
         f = f[f["Category"].astype(str).isin(sel_cats)]
+    if sel_subcats and "Sub Category" in f.columns:
+        f = f[f["Sub Category"].astype(str).isin(sel_subcats)]
+    if sel_subcats and "Sub Category" in f.columns:
+        f = f[f["Sub Category"].astype(str).isin(sel_subcats)]
     if sel_colors and "Color" in f.columns:
         f = f[f["Color"].isin(sel_colors)]
     if sel_sizes and "Size" in f.columns:
@@ -507,11 +545,17 @@ def main():
     if "STR Status" in f.columns and "Category" in f.columns:
         cd = f.copy()
         cd["Category"] = cd["Category"].fillna("—").astype(str).str.strip()
-        pivot = cd.groupby(["Category","STR Status"]).size().unstack(fill_value=0)
+        if "Sub Category" in cd.columns:
+            cd["Category Display"] = cd.apply(
+                lambda r: f"{r['Category']} · {r['Sub Category']}" if r.get("Sub Category","") not in ("","nan") else r["Category"],
+                axis=1)
+        else:
+            cd["Category Display"] = cd["Category"]
+        pivot = cd.groupby(["Category Display","STR Status"]).size().unstack(fill_value=0)
         ordered = [s for s in STR_ORDER if s in pivot.columns]
         if ordered: pivot = pivot[ordered]
         pivot["Total"] = pivot.sum(axis=1)
-        st.dataframe(pivot.sort_values("Total",ascending=False).head(25),
+        st.dataframe(pivot.sort_values("Total",ascending=False).head(40),
                      use_container_width=True)
 
     if is_variant and "Color" in f.columns:
