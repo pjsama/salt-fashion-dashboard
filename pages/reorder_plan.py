@@ -141,29 +141,32 @@ def load_location_stock():
             try: df = pd.read_excel(files[0], sheet_name="Store x Category", engine="openpyxl")
             except: pass
     if df is None or df.empty:
-        return None
+        return None, set()
 
     df.columns = [str(c).strip() for c in df.columns]
     cat_col = df.columns[0]  # "Category"
     store_cols = [c for c in df.columns if c != cat_col]
 
     long_rows = []
+    covered_stores = set()
     for _, row in df.iterrows():
         cat = str(row[cat_col]).strip()
         if not cat or cat.lower() in ("nan",""):
             continue
         for store in store_cols:
+            covered_stores.add(norm_store(store))
             qty = row[store]
-            if pd.isna(qty):
-                continue
+            # NaN means this category has zero stock at this (real, covered)
+            # location — not "data missing". Treat as real 0, not estimated.
+            qty_val = 0.0 if pd.isna(qty) else float(qty)
             long_rows.append({
                 "Location": norm_store(store),
                 "Category": cat,
-                "On_Hand_Real": max(0.0, float(qty)),
+                "On_Hand_Real": max(0.0, qty_val),
             })
     if not long_rows:
-        return None
-    return pd.DataFrame(long_rows)
+        return None, set()
+    return pd.DataFrame(long_rows), covered_stores
 
 def fmt_npr(v):
     if pd.isna(v) or v == 0: return "—"
@@ -175,7 +178,7 @@ def fmt_npr(v):
 with st.spinner("Loading data…"):
     df_prod   = load_products()
     df_pos    = load_pos()
-    df_locstk = load_location_stock()
+    df_locstk, covered_stores = load_location_stock()
 
 if df_prod is None or df_pos is None:
     st.error("Could not load data. Make sure both product and POS files are on Google Drive.")
@@ -292,6 +295,11 @@ for _, loc_row in pos_agg.iterrows():
         real_val = real_stock_map.get((loc, cat))
         if real_val is not None:
             est_stock = max(0, real_val)
+            stock_source = "real"
+        elif loc in covered_stores:
+            # Location has real stock coverage but this category had no
+            # quant records there at all -> genuinely zero stock, not unknown.
+            est_stock = 0
             stock_source = "real"
         else:
             est_stock = cat_row["On_Hand"] * share
