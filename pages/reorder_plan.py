@@ -28,7 +28,7 @@ st.markdown("""
 # ── Google Drive IDs ──────────────────────────────────────────────────────────
 GDRIVE_MAIN_ID    = "1kIHUlGCallLjXe9tiBrYDQ16ElQDmLR3"
 GDRIVE_POS_ID     = "1YcW30p_dUfeeaQj-XXmGhMHP0ldAM32X"
-GDRIVE_LOCSTK_ID  = ""   # ← fill in once you upload location_stock_*.xlsx to Drive
+GDRIVE_LOCSTK_ID  = "1zgTBhh7vOTjxEIz-LO3YSM-TXJeDUrBT"   # ← fill in once you upload location_stock_*.xlsx to Drive
 
 LOCATION_ORDER = ["Baneshwor","Lazimpat","Kumaripati","Chitwan","Pokhara","Online",
                   "Baneshwor Lush","Chitwan Lush","Pokhara Lush"]
