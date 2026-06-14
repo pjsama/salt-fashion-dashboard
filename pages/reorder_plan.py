@@ -20,15 +20,29 @@ st.markdown("""
 .kpi-box{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:14px 16px;text-align:center}
 .kpi-val{font-size:26px;font-weight:700;margin:0}
 .kpi-lbl{font-size:11px;color:#6b7280;margin:4px 0 0}
+.src-badge{display:inline-block;padding:1px 8px;border-radius:8px;font-size:10px;
+           font-weight:600;margin-left:6px}
 </style>
 """, unsafe_allow_html=True)
 
 # ── Google Drive IDs ──────────────────────────────────────────────────────────
-GDRIVE_MAIN_ID  = "1kIHUlGCallLjXe9tiBrYDQ16ElQDmLR3"
-GDRIVE_POS_ID   = "1YcW30p_dUfeeaQj-XXmGhMHP0ldAM32X"
+GDRIVE_MAIN_ID    = "1kIHUlGCallLjXe9tiBrYDQ16ElQDmLR3"
+GDRIVE_POS_ID     = "1YcW30p_dUfeeaQj-XXmGhMHP0ldAM32X"
+GDRIVE_LOCSTK_ID  = ""   # ← fill in once you upload location_stock_*.xlsx to Drive
 
 LOCATION_ORDER = ["Baneshwor","Lazimpat","Kumaripati","Chitwan","Pokhara","Online",
                   "Baneshwor Lush","Chitwan Lush","Pokhara Lush"]
+
+# Normalise store names from the location-stock export to match POS location names
+STORE_NAME_FIX = {
+    "lazimpat":       "Lazimpat",
+    "baneshwor":      "Baneshwor",
+    "chitwan":        "Chitwan",
+    "kumaripati":     "Kumaripati",
+    "pokhara":        "Pokhara",
+    "online":         "Online",
+    "main warehouse": "Main Warehouse",
+}
 
 SKIP_PARTS = {"All","Saleable","PoS",""}
 
@@ -37,8 +51,13 @@ def split_cat(raw):
     if not parts: return ""
     return parts[-2] if len(parts) >= 2 else parts[0]
 
+def norm_store(name):
+    return STORE_NAME_FIX.get(str(name).strip().lower(), str(name).strip())
+
 # ── Loaders ───────────────────────────────────────────────────────────────────
 def gdrive_bytes(file_id):
+    if not file_id:
+        return None
     try:
         from google.oauth2.service_account import Credentials
         import googleapiclient.discovery
@@ -103,6 +122,49 @@ def load_pos():
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
     return df
 
+@st.cache_data(ttl=600, show_spinner=False)
+def load_location_stock():
+    """
+    Loads exports/location_stock_*.xlsx -> 'Store x Category' sheet.
+    Returns a long dataframe: Location, Category, On_Hand  (real stock)
+    or None if the file isn't available yet.
+    """
+    buf = gdrive_bytes(GDRIVE_LOCSTK_ID)
+    df = None
+    if buf:
+        try: df = pd.read_excel(buf, sheet_name="Store x Category", engine="openpyxl")
+        except: pass
+    if df is None:
+        base = r"C:\Users\Legion\Desktop\odoo_export\exports"
+        files = sorted(Path(base).glob("location_stock_*.xlsx"), reverse=True) if Path(base).exists() else []
+        if files:
+            try: df = pd.read_excel(files[0], sheet_name="Store x Category", engine="openpyxl")
+            except: pass
+    if df is None or df.empty:
+        return None
+
+    df.columns = [str(c).strip() for c in df.columns]
+    cat_col = df.columns[0]  # "Category"
+    store_cols = [c for c in df.columns if c != cat_col]
+
+    long_rows = []
+    for _, row in df.iterrows():
+        cat = str(row[cat_col]).strip()
+        if not cat or cat.lower() in ("nan",""):
+            continue
+        for store in store_cols:
+            qty = row[store]
+            if pd.isna(qty):
+                continue
+            long_rows.append({
+                "Location": norm_store(store),
+                "Category": cat,
+                "On_Hand_Real": float(qty),
+            })
+    if not long_rows:
+        return None
+    return pd.DataFrame(long_rows)
+
 def fmt_npr(v):
     if pd.isna(v) or v == 0: return "—"
     if v >= 1_000_000: return f"NPR {v/1_000_000:.1f}M"
@@ -111,12 +173,15 @@ def fmt_npr(v):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 with st.spinner("Loading data…"):
-    df_prod = load_products()
-    df_pos  = load_pos()
+    df_prod   = load_products()
+    df_pos    = load_pos()
+    df_locstk = load_location_stock()
 
 if df_prod is None or df_pos is None:
     st.error("Could not load data. Make sure both product and POS files are on Google Drive.")
     st.stop()
+
+USING_REAL_STOCK = df_locstk is not None and not df_locstk.empty
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -147,6 +212,13 @@ with st.sidebar:
     sel_cat = st.selectbox("Filter by category", cats)
 
     st.markdown("---")
+    if USING_REAL_STOCK:
+        st.success("✅ Using real per-location stock")
+    else:
+        st.warning("⚠️ Real location stock not found — using estimated split. "
+                    "Run `python fetch_location_stock.py` and upload to Drive, "
+                    "or place the file in `exports/`.")
+
     if st.button("🔄 Refresh", use_container_width=True):
         st.cache_data.clear(); st.rerun()
 
@@ -175,36 +247,36 @@ pos_agg["Weekly_Rate"]   = pos_agg["Total_Units"] / lookback_weeks
 pos_agg["Daily_Rate"]    = pos_agg["Total_Units"] / (lookback_weeks * 7)
 pos_agg["Weekly_Revenue"]= pos_agg["Total_Revenue"] / lookback_weeks
 
-# ── Stock per category from product data ─────────────────────────────────────
+# ── Stock per category from product data (fallback / brand total) ─────────────
 prod_brand = df_prod[df_prod["Brand"] == sel_brand].copy()
 
-# Category-level stock aggregation
+# Category-level stock aggregation (used as fallback when real stock missing)
 cat_stock = prod_brand.groupby("Category").agg(
     On_Hand=("On Hand Qty","sum"),
     Products=("Product Name","nunique"),
     Avg_Price=("Sales Price","mean"),
 ).reset_index()
 
-# ── Build reorder plan ────────────────────────────────────────────────────────
-# We need: category stock × location weekly rate
-# Since POS data doesn't split by category per location, we:
-# 1. Get each location's % of total sales
-# 2. Distribute category stock proportionally across locations
-# 3. Calculate reorder need per location
+# Avg price lookup per category (used regardless of stock source)
+avg_price_map = cat_stock.set_index("Category")["Avg_Price"].to_dict()
 
+# ── Build reorder plan ────────────────────────────────────────────────────────
 total_units = pos_agg["Total_Units"].sum()
 pos_agg["Location_Share"] = pos_agg["Total_Units"] / total_units if total_units > 0 else 0
 
-# Per category, estimate units sold at each location
-# Use variant-level or template-level sold data
+# Per category, estimate units sold (annualised -> weekly), used to split a
+# location's overall weekly rate across categories
 cat_sold = prod_brand.groupby("Category")["Total Units Sold"].sum().reset_index()
 cat_sold.columns = ["Category","Total_Sold"]
-
-# Merge
 cat_data = cat_stock.merge(cat_sold, on="Category", how="left").fillna(0)
-cat_data["Avg_Weekly_Sold"] = cat_data["Total_Sold"] / 52  # annualised to weekly
+total_sold_all = cat_data["Total_Sold"].sum()
 
-# Build location × category reorder table
+# Real stock lookup: (location, category) -> on-hand
+real_stock_map = {}
+if USING_REAL_STOCK:
+    for _, r in df_locstk.iterrows():
+        real_stock_map[(r["Location"], r["Category"])] = r["On_Hand_Real"]
+
 rows = []
 for _, loc_row in pos_agg.iterrows():
     loc   = loc_row["Location"]
@@ -213,25 +285,31 @@ for _, loc_row in pos_agg.iterrows():
     loc_weekly_rev  = loc_row["Weekly_Revenue"]
 
     for _, cat_row in cat_data.iterrows():
-        cat        = cat_row["Category"]
+        cat = cat_row["Category"]
         if not cat or cat in ("nan","","All"): continue
 
-        # Estimated stock at this location (proportional share)
-        est_stock      = cat_row["On_Hand"] * share
+        # ── Stock: real per-location if available, else proportional estimate ──
+        real_val = real_stock_map.get((loc, cat))
+        if real_val is not None:
+            est_stock = real_val
+            stock_source = "real"
+        else:
+            est_stock = cat_row["On_Hand"] * share
+            stock_source = "est"
+
         # Weekly sell rate for this category at this location
-        cat_share_of_total = cat_row["Total_Sold"] / cat_data["Total_Sold"].sum() \
-                             if cat_data["Total_Sold"].sum() > 0 else 0
-        weekly_rate    = loc_weekly_rate * cat_share_of_total
+        cat_share_of_total = cat_row["Total_Sold"] / total_sold_all if total_sold_all > 0 else 0
+        weekly_rate = loc_weekly_rate * cat_share_of_total
         if weekly_rate < min_weekly_rate: continue
 
-        # Days of cover
-        daily_rate     = weekly_rate / 7
-        days_cover     = est_stock / daily_rate if daily_rate > 0 else 999
-        weeks_cover    = days_cover / 7
+        # Days / weeks of cover
+        daily_rate  = weekly_rate / 7
+        days_cover  = est_stock / daily_rate if daily_rate > 0 else 999
+        weeks_cover = days_cover / 7
 
         # Reorder quantity
-        target_stock   = target_weeks * weekly_rate
-        reorder_qty    = max(0, round(target_stock - est_stock))
+        target_stock = target_weeks * weekly_rate
+        reorder_qty  = max(0, round(target_stock - est_stock))
 
         # Urgency
         if weeks_cover <= 1:
@@ -248,11 +326,12 @@ for _, loc_row in pos_agg.iterrows():
             "Location":      loc,
             "Category":      cat,
             "Est. Stock":    round(est_stock),
+            "Stock Source":  stock_source,
             "Weekly Rate":   round(weekly_rate, 1),
             "Weeks Cover":   round(weeks_cover, 1),
             "Target Stock":  round(target_stock),
             "Reorder Qty":   reorder_qty,
-            "Est. Value":    round(reorder_qty * cat_row["Avg_Price"]),
+            "Est. Value":    round(reorder_qty * avg_price_map.get(cat, 0)),
             "Urgency":       urgency,
             "_urgency_key":  urgency_key,
             "_weekly_rev":   loc_weekly_rev * cat_share_of_total,
@@ -274,7 +353,13 @@ df_plan = df_plan.sort_values(["_urgency_key","Reorder Qty"], ascending=[True,Fa
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.title("📦 Reorder Planner")
-st.caption(f"{sel_brand} · {target_weeks}-week target cover · Based on last {lookback_weeks} weeks of sales · {today.strftime('%B %d, %Y')}")
+src_badge = ('<span class="src-badge" style="background:#dcfce7;color:#166534">Real stock</span>'
+              if USING_REAL_STOCK else
+              '<span class="src-badge" style="background:#fef3c7;color:#92400e">Estimated stock</span>')
+st.markdown(
+    f"{sel_brand} · {target_weeks}-week target cover · Based on last {lookback_weeks} weeks of sales · "
+    f"{today.strftime('%B %d, %Y')} {src_badge}",
+    unsafe_allow_html=True)
 
 # ── KPI strip ─────────────────────────────────────────────────────────────────
 urgent_count  = len(df_plan[df_plan["_urgency_key"]==0])
@@ -307,6 +392,9 @@ with tab1:
         for _, r in needs_action.iterrows():
             css = "urgent" if r["_urgency_key"]==0 else "warning"
             weeks_str = f"{r['Weeks Cover']:.1f} weeks" if r['Weeks Cover'] < 99 else "No sales"
+            src_tag = ('<span class="src-badge" style="background:#dcfce7;color:#166534">real</span>'
+                       if r["Stock Source"]=="real" else
+                       '<span class="src-badge" style="background:#fef3c7;color:#92400e">est</span>')
             st.markdown(f"""
             <div class="reorder-card {css}">
               <div style="display:flex;justify-content:space-between;align-items:center">
@@ -317,7 +405,7 @@ with tab1:
                 <span style="font-size:13px;font-weight:600">{r['Urgency']}</span>
               </div>
               <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-top:10px">
-                <div><div style="font-size:10px;color:#94a3b8">Est. Stock</div>
+                <div><div style="font-size:10px;color:#94a3b8">Est. Stock {src_tag}</div>
                      <div style="font-size:15px;font-weight:600">{int(r['Est. Stock']):,}</div></div>
                 <div><div style="font-size:10px;color:#94a3b8">Weekly Rate</div>
                      <div style="font-size:15px;font-weight:600">{r['Weekly Rate']:.1f} u/wk</div></div>
@@ -334,9 +422,10 @@ with tab1:
 with tab2:
     st.markdown("**Full reorder plan — all categories and locations**")
     display = df_plan[[
-        "Urgency","Location","Category","Est. Stock","Weekly Rate",
+        "Urgency","Location","Category","Est. Stock","Stock Source","Weekly Rate",
         "Weeks Cover","Target Stock","Reorder Qty","Est. Value"
     ]].copy()
+    display["Stock Source"] = display["Stock Source"].map({"real":"✅ Real","est":"≈ Estimated"})
     display["Est. Value"] = display["Est. Value"].apply(lambda x: fmt_npr(x))
     st.dataframe(display, use_container_width=True, hide_index=True)
 
@@ -344,7 +433,7 @@ with tab2:
     if st.button("⬇️ Download reorder plan as Excel"):
         out = BytesIO()
         export_df = df_plan[[
-            "Urgency","Location","Category","Est. Stock","Weekly Rate",
+            "Urgency","Location","Category","Est. Stock","Stock Source","Weekly Rate",
             "Weeks Cover","Target Stock","Reorder Qty","Est. Value"
         ]].copy()
         export_df.to_excel(out, index=False, engine="openpyxl")
@@ -370,23 +459,8 @@ with tab3:
     loc_summary = loc_summary.sort_values("_o").drop(columns=["_o"])
     loc_summary["Total_Value"] = loc_summary["Total_Value"].apply(fmt_npr)
     loc_summary = loc_summary.rename(columns={
-        "Total_Units":"Units to Reorder","Total_Value":"Est. Value",
-        "Reorder_Soon":"Reorder Soon"})
+        "Total_Units":"Units to Reorder",
+        "Total_Value":"Est. Value",
+        "Reorder_Soon":"Reorder Soon",
+    })
     st.dataframe(loc_summary, use_container_width=True, hide_index=True)
-
-    # Horizontal bar chart — reorder units by location
-    st.markdown("**Units needed by location**")
-    chart_df = df_plan.groupby("Location")["Reorder Qty"].sum().reset_index()
-    chart_df["_o"] = chart_df["Location"].apply(
-        lambda x: LOCATION_ORDER.index(x) if x in LOCATION_ORDER else 99)
-    chart_df = chart_df.sort_values("_o").drop(columns=["_o"])
-    st.bar_chart(chart_df.set_index("Location")["Reorder Qty"])
-
-# ── Footer note ───────────────────────────────────────────────────────────────
-st.markdown("---")
-st.caption(
-    f"⚠️ Stock estimates per location are calculated proportionally from total stock × location sales share. "
-    f"For exact per-location stock counts, a warehouse integration would be needed. "
-    f"Reorder Qty = ({target_weeks} weeks × weekly rate) − estimated current stock. "
-    f"All figures based on last {lookback_weeks} weeks of POS data."
-)
