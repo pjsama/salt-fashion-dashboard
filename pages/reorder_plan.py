@@ -159,7 +159,7 @@ def load_location_stock():
             long_rows.append({
                 "Location": norm_store(store),
                 "Category": cat,
-                "On_Hand_Real": float(qty),
+                "On_Hand_Real": max(0.0, float(qty)),
             })
     if not long_rows:
         return None
@@ -291,7 +291,7 @@ for _, loc_row in pos_agg.iterrows():
         # ── Stock: real per-location if available, else proportional estimate ──
         real_val = real_stock_map.get((loc, cat))
         if real_val is not None:
-            est_stock = real_val
+            est_stock = max(0, real_val)
             stock_source = "real"
         else:
             est_stock = cat_row["On_Hand"] * share
