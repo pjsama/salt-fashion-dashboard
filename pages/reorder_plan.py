@@ -54,6 +54,32 @@ def split_cat(raw):
 def norm_store(name):
     return STORE_NAME_FIX.get(str(name).strip().lower(), str(name).strip())
 
+# ── Seasonal category classification ──────────────────────────────────────────
+# Helps flag winter-heavy categories during summer months (and vice versa) so
+# buying decisions aren't driven purely by short-term stockout math on
+# off-season leftovers.
+WINTER_CATEGORIES = {
+    "Coat","Jacket","Sweater","Cardigan","Sweatshirt","Hoodie","Waistcoat",
+    "Pajamas Set","Vest","Knitted","Fur Regular","Wool",
+}
+SUMMER_CATEGORIES = {
+    "T-Shirts","Shorts","Tops","Dress","Co-Ord Set","Tank Top","Swim Wear",
+    "Skirt","Skort","Sundress","Basic Top",
+}
+
+def season_for_month(month):
+    # Nepal: roughly Nov-Feb = winter, Apr/Oct = transition, May-Sep = summer
+    if month in (11,12,1,2): return "Winter"
+    if month in (5,6,7,8,9):  return "Summer"
+    return "Transition"  # Mar, Apr, Oct — shoulder months
+
+CURRENT_SEASON = season_for_month(pd.Timestamp.today().month)
+
+def category_season(cat):
+    if cat in WINTER_CATEGORIES: return "Winter"
+    if cat in SUMMER_CATEGORIES: return "Summer"
+    return "All-Season"
+
 # ── Loaders ───────────────────────────────────────────────────────────────────
 def gdrive_bytes(file_id):
     if not file_id:
@@ -168,6 +194,29 @@ def load_location_stock():
         return None, set()
     return pd.DataFrame(long_rows), covered_stores
 
+@st.cache_data(ttl=600, show_spinner=False)
+def load_recent_category_sales():
+    """
+    Loads exports/category_sales_recent_*.xlsx
+    Returns dataframe: Location, Category, Units Sold, Weeks, Weekly Rate
+    or None if not available.
+    """
+    base = r"C:\Users\Legion\Desktop\odoo_export\exports"
+    files = sorted(Path(base).glob("category_sales_recent_*.xlsx"), reverse=True) \
+            if Path(base).exists() else []
+    if not files:
+        return None
+    try:
+        df = pd.read_excel(files[0], sheet_name="Recent Category Sales", engine="openpyxl")
+    except Exception:
+        return None
+    if df.empty:
+        return None
+    df.columns = [str(c).strip() for c in df.columns]
+    df["Location"] = df["Location"].apply(norm_store)
+    return df
+
+
 def fmt_npr(v):
     if pd.isna(v) or v == 0: return "—"
     if v >= 1_000_000: return f"NPR {v/1_000_000:.1f}M"
@@ -179,12 +228,14 @@ with st.spinner("Loading data…"):
     df_prod   = load_products()
     df_pos    = load_pos()
     df_locstk, covered_stores = load_location_stock()
+    df_recent_cat = load_recent_category_sales()
 
 if df_prod is None or df_pos is None:
     st.error("Could not load data. Make sure both product and POS files are on Google Drive.")
     st.stop()
 
 USING_REAL_STOCK = df_locstk is not None and not df_locstk.empty
+USING_SEASONAL_RATES = df_recent_cat is not None and not df_recent_cat.empty
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -214,6 +265,13 @@ with st.sidebar:
                               if c and c not in ("nan","")])
     sel_cat = st.selectbox("Filter by category", cats)
 
+    season_options = ["All", "Summer", "Winter", "All-Season"]
+    sel_season = st.selectbox("Filter by season", season_options, index=0,
+        help=f"Current season: {CURRENT_SEASON}. Winter items (coats, jackets, "
+             f"sweaters) often show as 'Urgent' in summer due to leftover stock "
+             f"selling slowly — filter to 'Summer' or 'All-Season' to focus on "
+             f"what's actually relevant to buy right now.")
+
     st.markdown("---")
     if USING_REAL_STOCK:
         st.success("✅ Using real per-location stock")
@@ -221,6 +279,14 @@ with st.sidebar:
         st.warning("⚠️ Real location stock not found — using estimated split. "
                     "Run `python fetch_location_stock.py` and upload to Drive, "
                     "or place the file in `exports/`.")
+
+    if USING_SEASONAL_RATES:
+        st.success(f"✅ Using current-season sell rates")
+    else:
+        st.warning("⚠️ Seasonal sales data not found — winter items may show "
+                    "as 'urgent' based on all-time sales. Run "
+                    "`python fetch_recent_category_sales.py --brand SALT` "
+                    "and place the file in `exports/`.")
 
     if st.button("🔄 Refresh", use_container_width=True):
         st.cache_data.clear(); st.rerun()
@@ -280,6 +346,16 @@ if USING_REAL_STOCK:
     for _, r in df_locstk.iterrows():
         real_stock_map[(r["Location"], r["Category"])] = r["On_Hand_Real"]
 
+# Recent seasonal weekly-rate lookup: (location, category) -> weekly rate
+# This is the FIX for the winter-coat-in-summer problem: instead of splitting
+# a location's current overall weekly rate by each category's ALL-TIME sales
+# share (which keeps winter items looking "hot" in summer), we use each
+# category's ACTUAL recent (last N weeks) sales rate at that location.
+recent_rate_map = {}
+if USING_SEASONAL_RATES:
+    for _, r in df_recent_cat.iterrows():
+        recent_rate_map[(r["Location"], r["Category"])] = float(r.get("Weekly Rate", 0) or 0)
+
 rows = []
 for _, loc_row in pos_agg.iterrows():
     loc   = loc_row["Location"]
@@ -305,9 +381,15 @@ for _, loc_row in pos_agg.iterrows():
             est_stock = cat_row["On_Hand"] * share
             stock_source = "est"
 
-        # Weekly sell rate for this category at this location
+        # ── Weekly rate: recent seasonal data if available, else all-time share ──
         cat_share_of_total = cat_row["Total_Sold"] / total_sold_all if total_sold_all > 0 else 0
-        weekly_rate = loc_weekly_rate * cat_share_of_total
+        if (loc, cat) in recent_rate_map:
+            weekly_rate = recent_rate_map[(loc, cat)]
+            rate_source = "seasonal"
+        else:
+            weekly_rate = loc_weekly_rate * cat_share_of_total
+            rate_source = "alltime"
+
         if weekly_rate < min_weekly_rate: continue
 
         # Days / weeks of cover
@@ -333,8 +415,10 @@ for _, loc_row in pos_agg.iterrows():
         rows.append({
             "Location":      loc,
             "Category":      cat,
+            "Season":        category_season(cat),
             "Est. Stock":    round(est_stock),
             "Stock Source":  stock_source,
+            "Rate Source":   rate_source,
             "Weekly Rate":   round(weekly_rate, 1),
             "Weeks Cover":   round(weeks_cover, 1),
             "Target Stock":  round(target_stock),
@@ -342,7 +426,7 @@ for _, loc_row in pos_agg.iterrows():
             "Est. Value":    round(reorder_qty * avg_price_map.get(cat, 0)),
             "Urgency":       urgency,
             "_urgency_key":  urgency_key,
-            "_weekly_rev":   loc_weekly_rev * cat_share_of_total,
+            "_weekly_rev":   loc_weekly_rev * cat_share_of_total if rate_source == "alltime" else 0,
         })
 
 df_plan = pd.DataFrame(rows)
@@ -356,6 +440,8 @@ if sel_loc != "All":
     df_plan = df_plan[df_plan["Location"] == sel_loc]
 if sel_cat != "All":
     df_plan = df_plan[df_plan["Category"] == sel_cat]
+if sel_season != "All":
+    df_plan = df_plan[df_plan["Season"] == sel_season]
 
 df_plan = df_plan.sort_values(["_urgency_key","Reorder Qty"], ascending=[True,False])
 
@@ -400,15 +486,23 @@ with tab1:
         for _, r in needs_action.iterrows():
             css = "urgent" if r["_urgency_key"]==0 else "warning"
             weeks_str = f"{r['Weeks Cover']:.1f} weeks" if r['Weeks Cover'] < 99 else "No sales"
-            src_tag = ('<span class="src-badge" style="background:#dcfce7;color:#166534">real</span>'
+            src_tag = ('<span class="src-badge" style="background:#dcfce7;color:#166534">real stock</span>'
                        if r["Stock Source"]=="real" else
-                       '<span class="src-badge" style="background:#fef3c7;color:#92400e">est</span>')
+                       '<span class="src-badge" style="background:#fef3c7;color:#92400e">est stock</span>')
+            rate_tag = ('<span class="src-badge" style="background:#dbeafe;color:#1e40af">current season</span>'
+                        if r["Rate Source"]=="seasonal" else
+                        '<span class="src-badge" style="background:#fee2e2;color:#991b1b">all-time avg</span>')
+            season_tag = ""
+            if r["Season"] != "All-Season" and r["Season"] != CURRENT_SEASON:
+                season_tag = (f'<span class="src-badge" style="background:#f1f5f9;color:#475569">'
+                               f'{r["Season"]} item — off-season</span>')
             st.markdown(f"""
             <div class="reorder-card {css}">
               <div style="display:flex;justify-content:space-between;align-items:center">
                 <div>
                   <span style="font-size:14px;font-weight:600;color:#0f172a">{r['Category']}</span>
                   <span style="font-size:12px;color:#64748b;margin-left:8px">📍 {r['Location']}</span>
+                  {season_tag}
                 </div>
                 <span style="font-size:13px;font-weight:600">{r['Urgency']}</span>
               </div>
@@ -430,7 +524,7 @@ with tab1:
 with tab2:
     st.markdown("**Full reorder plan — all categories and locations**")
     display = df_plan[[
-        "Urgency","Location","Category","Est. Stock","Stock Source","Weekly Rate",
+        "Urgency","Location","Category","Season","Est. Stock","Stock Source","Weekly Rate",
         "Weeks Cover","Target Stock","Reorder Qty","Est. Value"
     ]].copy()
     display["Stock Source"] = display["Stock Source"].map({"real":"✅ Real","est":"≈ Estimated"})
@@ -441,7 +535,7 @@ with tab2:
     if st.button("⬇️ Download reorder plan as Excel"):
         out = BytesIO()
         export_df = df_plan[[
-            "Urgency","Location","Category","Est. Stock","Stock Source","Weekly Rate",
+            "Urgency","Location","Category","Season","Est. Stock","Stock Source","Weekly Rate",
             "Weeks Cover","Target Stock","Reorder Qty","Est. Value"
         ]].copy()
         export_df.to_excel(out, index=False, engine="openpyxl")
