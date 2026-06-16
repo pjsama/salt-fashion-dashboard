@@ -26,9 +26,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Google Drive IDs ──────────────────────────────────────────────────────────
-GDRIVE_MAIN_ID    = "1kIHUlGCallLjXe9tiBrYDQ16ElQDmLR3"
-GDRIVE_POS_ID     = "1YcW30p_dUfeeaQj-XXmGhMHP0ldAM32X"
-GDRIVE_LOCSTK_ID  = "1zgTBhh7vOTjxEIz-LO3YSM-TXJeDUrBT"   # ← fill in once you upload location_stock_*.xlsx to Drive
+GDRIVE_MAIN_ID      = "1kIHUlGCallLjXe9tiBrYDQ16ElQDmLR3"
+GDRIVE_POS_ID       = "1YcW30p_dUfeeaQj-XXmGhMHP0ldAM32X"
+GDRIVE_LOCSTK_ID    = "1zgTBhh7vOTjxEIz-LO3YSM-TXJeDUrBT"   # location_stock_*.xlsx
+GDRIVE_RECENTCAT_ID = "1EMEw10v7zEwsMzrocJWCjkyRfy14LaIM"   # ← fill in once you upload category_sales_recent_*.xlsx to Drive
 
 LOCATION_ORDER = ["Baneshwor","Lazimpat","Kumaripati","Chitwan","Pokhara","Online",
                   "Baneshwor Lush","Chitwan Lush","Pokhara Lush"]
@@ -83,7 +84,7 @@ def category_season(cat):
 # ── Loaders ───────────────────────────────────────────────────────────────────
 def gdrive_bytes(file_id):
     if not file_id:
-        return None
+        return None, None
     try:
         from google.oauth2.service_account import Credentials
         import googleapiclient.discovery
@@ -99,12 +100,13 @@ def gdrive_bytes(file_id):
         dl   = MediaIoBaseDownload(buf, req)
         done = False
         while not done: _, done = dl.next_chunk()
-        buf.seek(0); return buf
-    except: return None
+        buf.seek(0); return buf, None
+    except Exception as e:
+        return None, str(e)
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_products():
-    buf = gdrive_bytes(GDRIVE_MAIN_ID)
+    buf, _ = gdrive_bytes(GDRIVE_MAIN_ID)
     if buf:
         try: df = pd.read_excel(buf, sheet_name="Products", engine="openpyxl")
         except: df = None
@@ -128,7 +130,7 @@ def load_products():
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_pos():
-    buf = gdrive_bytes(GDRIVE_POS_ID)
+    buf, _ = gdrive_bytes(GDRIVE_POS_ID)
     df = None
     if buf:
         try: df = pd.read_excel(buf, sheet_name="Point of Sale Analysis", engine="openpyxl")
@@ -152,22 +154,24 @@ def load_pos():
 def load_location_stock():
     """
     Loads exports/location_stock_*.xlsx -> 'Store x Category' sheet.
-    Returns a long dataframe: Location, Category, On_Hand  (real stock)
-    or None if the file isn't available yet.
+    Returns (dataframe_or_None, covered_stores_set, error_or_None)
     """
-    buf = gdrive_bytes(GDRIVE_LOCSTK_ID)
+    buf, err = gdrive_bytes(GDRIVE_LOCSTK_ID)
     df = None
     if buf:
         try: df = pd.read_excel(buf, sheet_name="Store x Category", engine="openpyxl")
-        except: pass
+        except Exception as e: err = f"Drive file found but sheet read failed: {e}"
     if df is None:
         base = r"C:\Users\Legion\Desktop\odoo_export\exports"
         files = sorted(Path(base).glob("location_stock_*.xlsx"), reverse=True) if Path(base).exists() else []
         if files:
-            try: df = pd.read_excel(files[0], sheet_name="Store x Category", engine="openpyxl")
-            except: pass
+            try:
+                df = pd.read_excel(files[0], sheet_name="Store x Category", engine="openpyxl")
+                err = None
+            except Exception as e:
+                err = f"Local file found but sheet read failed: {e}"
     if df is None or df.empty:
-        return None, set()
+        return None, set(), err
 
     df.columns = [str(c).strip() for c in df.columns]
     cat_col = df.columns[0]  # "Category"
@@ -191,30 +195,37 @@ def load_location_stock():
                 "On_Hand_Real": max(0.0, qty_val),
             })
     if not long_rows:
-        return None, set()
-    return pd.DataFrame(long_rows), covered_stores
+        return None, set(), err
+    return pd.DataFrame(long_rows), covered_stores, None
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_recent_category_sales():
     """
-    Loads exports/category_sales_recent_*.xlsx
-    Returns dataframe: Location, Category, Units Sold, Weeks, Weekly Rate
-    or None if not available.
+    Loads category_sales_recent_*.xlsx -> 'Recent Category Sales' sheet.
+    Tries Google Drive first (GDRIVE_RECENTCAT_ID), then local exports/ folder
+    (only works when running locally, not on Streamlit Cloud).
+    Returns (dataframe_or_None, error_or_None)
     """
-    base = r"C:\Users\Legion\Desktop\odoo_export\exports"
-    files = sorted(Path(base).glob("category_sales_recent_*.xlsx"), reverse=True) \
-            if Path(base).exists() else []
-    if not files:
-        return None
-    try:
-        df = pd.read_excel(files[0], sheet_name="Recent Category Sales", engine="openpyxl")
-    except Exception:
-        return None
-    if df.empty:
-        return None
+    buf, err = gdrive_bytes(GDRIVE_RECENTCAT_ID)
+    df = None
+    if buf:
+        try: df = pd.read_excel(buf, sheet_name="Recent Category Sales", engine="openpyxl")
+        except Exception as e: err = f"Drive file found but sheet read failed: {e}"
+    if df is None:
+        base = r"C:\Users\Legion\Desktop\odoo_export\exports"
+        files = sorted(Path(base).glob("category_sales_recent_*.xlsx"), reverse=True) \
+                if Path(base).exists() else []
+        if files:
+            try:
+                df = pd.read_excel(files[0], sheet_name="Recent Category Sales", engine="openpyxl")
+                err = None
+            except Exception as e:
+                err = f"Local file found but sheet read failed: {e}"
+    if df is None or df.empty:
+        return None, err
     df.columns = [str(c).strip() for c in df.columns]
     df["Location"] = df["Location"].apply(norm_store)
-    return df
+    return df, None
 
 
 def fmt_npr(v):
@@ -227,8 +238,8 @@ def fmt_npr(v):
 with st.spinner("Loading data…"):
     df_prod   = load_products()
     df_pos    = load_pos()
-    df_locstk, covered_stores = load_location_stock()
-    df_recent_cat = load_recent_category_sales()
+    df_locstk, covered_stores, locstk_err = load_location_stock()
+    df_recent_cat, recentcat_err = load_recent_category_sales()
 
 if df_prod is None or df_pos is None:
     st.error("Could not load data. Make sure both product and POS files are on Google Drive.")
@@ -276,17 +287,22 @@ with st.sidebar:
     if USING_REAL_STOCK:
         st.success("✅ Using real per-location stock")
     else:
-        st.warning("⚠️ Real location stock not found — using estimated split. "
-                    "Run `python fetch_location_stock.py` and upload to Drive, "
-                    "or place the file in `exports/`.")
+        msg = "⚠️ Real location stock not found — using estimated split. "
+        if locstk_err:
+            msg += f"Error: {locstk_err}. "
+        msg += ("Run `python fetch_location_stock.py`, upload the file to "
+                "Drive, and set GDRIVE_LOCSTK_ID.")
+        st.warning(msg)
 
     if USING_SEASONAL_RATES:
-        st.success(f"✅ Using current-season sell rates")
+        st.success("✅ Using current-season sell rates")
     else:
-        st.warning("⚠️ Seasonal sales data not found — winter items may show "
-                    "as 'urgent' based on all-time sales. Run "
-                    "`python fetch_recent_category_sales.py --brand SALT` "
-                    "and place the file in `exports/`.")
+        msg = "⚠️ Seasonal sales data not found — winter items may show as 'urgent' based on all-time sales. "
+        if recentcat_err:
+            msg += f"Error: {recentcat_err}. "
+        msg += ("Run `python fetch_recent_category_sales.py --brand SALT`, "
+                "upload the output to Drive, and set GDRIVE_RECENTCAT_ID.")
+        st.warning(msg)
 
     if st.button("🔄 Refresh", use_container_width=True):
         st.cache_data.clear(); st.rerun()
@@ -486,40 +502,45 @@ with tab1:
         for _, r in needs_action.iterrows():
             css = "urgent" if r["_urgency_key"]==0 else "warning"
             weeks_str = f"{r['Weeks Cover']:.1f} weeks" if r['Weeks Cover'] < 99 else "No sales"
+
             src_tag = ('<span class="src-badge" style="background:#dcfce7;color:#166534">real stock</span>'
                        if r["Stock Source"]=="real" else
                        '<span class="src-badge" style="background:#fef3c7;color:#92400e">est stock</span>')
-            rate_tag = ('<span class="src-badge" style="background:#dbeafe;color:#1e40af">current season</span>'
-                        if r["Rate Source"]=="seasonal" else
-                        '<span class="src-badge" style="background:#fee2e2;color:#991b1b">all-time avg</span>')
+
             season_tag = ""
             if r["Season"] != "All-Season" and r["Season"] != CURRENT_SEASON:
                 season_tag = (f'<span class="src-badge" style="background:#f1f5f9;color:#475569">'
                                f'{r["Season"]} item — off-season</span>')
-            st.markdown(f"""
-            <div class="reorder-card {css}">
-              <div style="display:flex;justify-content:space-between;align-items:center">
-                <div>
-                  <span style="font-size:14px;font-weight:600;color:#0f172a">{r['Category']}</span>
-                  <span style="font-size:12px;color:#64748b;margin-left:8px">📍 {r['Location']}</span>
-                  {season_tag}
-                </div>
-                <span style="font-size:13px;font-weight:600">{r['Urgency']}</span>
-              </div>
-              <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-top:10px">
-                <div><div style="font-size:10px;color:#94a3b8">Est. Stock {src_tag}</div>
-                     <div style="font-size:15px;font-weight:600">{int(r['Est. Stock']):,}</div></div>
-                <div><div style="font-size:10px;color:#94a3b8">Weekly Rate</div>
-                     <div style="font-size:15px;font-weight:600">{r['Weekly Rate']:.1f} u/wk</div></div>
-                <div><div style="font-size:10px;color:#94a3b8">Weeks Cover</div>
-                     <div style="font-size:15px;font-weight:600;color:{'#dc2626' if r['_urgency_key']==0 else '#d97706'}">{weeks_str}</div></div>
-                <div><div style="font-size:10px;color:#94a3b8">Reorder Qty</div>
-                     <div style="font-size:15px;font-weight:600;color:#1d4ed8">{int(r['Reorder Qty']):,} units</div></div>
-                <div><div style="font-size:10px;color:#94a3b8">Est. Value</div>
-                     <div style="font-size:15px;font-weight:600">{fmt_npr(r['Est. Value'])}</div></div>
-              </div>
-            </div>
-            """, unsafe_allow_html=True)
+
+            # Build the card as a single-line HTML string (no leading
+            # whitespace on any line) — Streamlit's markdown renderer treats
+            # indented lines inside a triple-quoted f-string as a code block,
+            # which is what caused raw HTML tags to show up as text.
+            card_html = (
+                f'<div class="reorder-card {css}">'
+                f'<div style="display:flex;justify-content:space-between;align-items:center">'
+                f'<div>'
+                f'<span style="font-size:14px;font-weight:600;color:#0f172a">{r["Category"]}</span>'
+                f'<span style="font-size:12px;color:#64748b;margin-left:8px">📍 {r["Location"]}</span>'
+                f'{season_tag}'
+                f'</div>'
+                f'<span style="font-size:13px;font-weight:600">{r["Urgency"]}</span>'
+                f'</div>'
+                f'<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-top:10px">'
+                f'<div><div style="font-size:10px;color:#94a3b8">Est. Stock {src_tag}</div>'
+                f'<div style="font-size:15px;font-weight:600">{int(r["Est. Stock"]):,}</div></div>'
+                f'<div><div style="font-size:10px;color:#94a3b8">Weekly Rate</div>'
+                f'<div style="font-size:15px;font-weight:600">{r["Weekly Rate"]:.1f} u/wk</div></div>'
+                f'<div><div style="font-size:10px;color:#94a3b8">Weeks Cover</div>'
+                f'<div style="font-size:15px;font-weight:600;color:{"#dc2626" if r["_urgency_key"]==0 else "#d97706"}">{weeks_str}</div></div>'
+                f'<div><div style="font-size:10px;color:#94a3b8">Reorder Qty</div>'
+                f'<div style="font-size:15px;font-weight:600;color:#1d4ed8">{int(r["Reorder Qty"]):,} units</div></div>'
+                f'<div><div style="font-size:10px;color:#94a3b8">Est. Value</div>'
+                f'<div style="font-size:15px;font-weight:600">{fmt_npr(r["Est. Value"])}</div></div>'
+                f'</div>'
+                f'</div>'
+            )
+            st.markdown(card_html, unsafe_allow_html=True)
 
 with tab2:
     st.markdown("**Full reorder plan — all categories and locations**")
