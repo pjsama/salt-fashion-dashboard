@@ -28,13 +28,15 @@ st.markdown("""
 # ── Google Drive IDs ──────────────────────────────────────────────────────────
 GDRIVE_MAIN_ID      = "1kIHUlGCallLjXe9tiBrYDQ16ElQDmLR3"
 GDRIVE_POS_ID       = "1YcW30p_dUfeeaQj-XXmGhMHP0ldAM32X"
-GDRIVE_LOCSTK_ID    = "1zgTBhh7vOTjxEIz-LO3YSM-TXJeDUrBT"   # location_stock_*.xlsx
-GDRIVE_RECENTCAT_ID = "1EMEw10v7zEwsMzrocJWCjkyRfy14LaIM"   # ← fill in once you upload category_sales_recent_*.xlsx to Drive
+GDRIVE_LOCSTK_ID    = "1zgTBhh7vOTjxEIz-LO3YSM-TXJeDUrBT"
+GDRIVE_RECENTCAT_ID = "1EMEw10v7zEwsMzrocJWCjkyRfy14LaIM"
+
+# ── Planning constants ────────────────────────────────────────────────────────
+MIN_REORDER_QTY = 5   # suppress "Reorder Soon" when the gap is trivially small
 
 LOCATION_ORDER = ["Baneshwor","Lazimpat","Kumaripati","Chitwan","Pokhara","Online",
                   "Baneshwor Lush","Chitwan Lush","Pokhara Lush"]
 
-# Normalise store names from the location-stock export to match POS location names
 STORE_NAME_FIX = {
     "lazimpat":       "Lazimpat",
     "baneshwor":      "Baneshwor",
@@ -56,9 +58,6 @@ def norm_store(name):
     return STORE_NAME_FIX.get(str(name).strip().lower(), str(name).strip())
 
 # ── Seasonal category classification ──────────────────────────────────────────
-# Helps flag winter-heavy categories during summer months (and vice versa) so
-# buying decisions aren't driven purely by short-term stockout math on
-# off-season leftovers.
 WINTER_CATEGORIES = {
     "Coat","Jacket","Sweater","Cardigan","Sweatshirt","Hoodie","Waistcoat",
     "Pajamas Set","Vest","Knitted","Fur Regular","Wool",
@@ -69,10 +68,9 @@ SUMMER_CATEGORIES = {
 }
 
 def season_for_month(month):
-    # Nepal: roughly Nov-Feb = winter, Apr/Oct = transition, May-Sep = summer
     if month in (11,12,1,2): return "Winter"
     if month in (5,6,7,8,9):  return "Summer"
-    return "Transition"  # Mar, Apr, Oct — shoulder months
+    return "Transition"
 
 CURRENT_SEASON = season_for_month(pd.Timestamp.today().month)
 
@@ -152,10 +150,6 @@ def load_pos():
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_location_stock():
-    """
-    Loads exports/location_stock_*.xlsx -> 'Store x Category' sheet.
-    Returns (dataframe_or_None, covered_stores_set, error_or_None)
-    """
     buf, err = gdrive_bytes(GDRIVE_LOCSTK_ID)
     df = None
     if buf:
@@ -174,7 +168,7 @@ def load_location_stock():
         return None, set(), err
 
     df.columns = [str(c).strip() for c in df.columns]
-    cat_col = df.columns[0]  # "Category"
+    cat_col = df.columns[0]
     store_cols = [c for c in df.columns if c != cat_col]
 
     long_rows = []
@@ -186,8 +180,6 @@ def load_location_stock():
         for store in store_cols:
             covered_stores.add(norm_store(store))
             qty = row[store]
-            # NaN means this category has zero stock at this (real, covered)
-            # location — not "data missing". Treat as real 0, not estimated.
             qty_val = 0.0 if pd.isna(qty) else float(qty)
             long_rows.append({
                 "Location": norm_store(store),
@@ -200,12 +192,6 @@ def load_location_stock():
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_recent_category_sales():
-    """
-    Loads category_sales_recent_*.xlsx -> 'Recent Category Sales' sheet.
-    Tries Google Drive first (GDRIVE_RECENTCAT_ID), then local exports/ folder
-    (only works when running locally, not on Streamlit Cloud).
-    Returns (dataframe_or_None, error_or_None)
-    """
     buf, err = gdrive_bytes(GDRIVE_RECENTCAT_ID)
     df = None
     if buf:
@@ -270,7 +256,6 @@ with st.sidebar:
     locations = ["All"] + [l for l in LOCATION_ORDER if l in df_pos["Location"].unique()]
     sel_loc = st.selectbox("Filter by location", locations)
 
-    # Category filter
     prod_brand = df_prod[df_prod["Brand"] == sel_brand]
     cats = ["All"] + sorted([c for c in prod_brand["Category"].unique()
                               if c and c not in ("nan","")])
@@ -313,16 +298,13 @@ lookback_start = today - pd.Timedelta(weeks=lookback_weeks)
 
 pos_recent = df_pos[df_pos["Date"] >= lookback_start].copy()
 
-# Filter by brand (Salt locations vs Lush locations)
 if "Brand" in pos_recent.columns:
     b_key = "Lush" if "Lush" in sel_brand else "Salt"
     pos_recent = pos_recent[pos_recent["Brand"].str.contains(b_key, case=False, na=False)]
 
-# Weekly units sold per location
 qty_col = "QTY" if "QTY" in pos_recent.columns else "Units"
 rev_col = "Sales Amount" if "Sales Amount" in pos_recent.columns else "Revenue"
 
-# Aggregate: units per week per location
 pos_agg = pos_recent.groupby("Location").agg(
     Total_Units=(qty_col, "sum"),
     Total_Revenue=(rev_col, "sum"),
@@ -335,38 +317,28 @@ pos_agg["Weekly_Revenue"]= pos_agg["Total_Revenue"] / lookback_weeks
 # ── Stock per category from product data (fallback / brand total) ─────────────
 prod_brand = df_prod[df_prod["Brand"] == sel_brand].copy()
 
-# Category-level stock aggregation (used as fallback when real stock missing)
 cat_stock = prod_brand.groupby("Category").agg(
     On_Hand=("On Hand Qty","sum"),
     Products=("Product Name","nunique"),
     Avg_Price=("Sales Price","mean"),
 ).reset_index()
 
-# Avg price lookup per category (used regardless of stock source)
 avg_price_map = cat_stock.set_index("Category")["Avg_Price"].to_dict()
 
 # ── Build reorder plan ────────────────────────────────────────────────────────
 total_units = pos_agg["Total_Units"].sum()
 pos_agg["Location_Share"] = pos_agg["Total_Units"] / total_units if total_units > 0 else 0
 
-# Per category, estimate units sold (annualised -> weekly), used to split a
-# location's overall weekly rate across categories
 cat_sold = prod_brand.groupby("Category")["Total Units Sold"].sum().reset_index()
 cat_sold.columns = ["Category","Total_Sold"]
 cat_data = cat_stock.merge(cat_sold, on="Category", how="left").fillna(0)
 total_sold_all = cat_data["Total_Sold"].sum()
 
-# Real stock lookup: (location, category) -> on-hand
 real_stock_map = {}
 if USING_REAL_STOCK:
     for _, r in df_locstk.iterrows():
         real_stock_map[(r["Location"], r["Category"])] = r["On_Hand_Real"]
 
-# Recent seasonal weekly-rate lookup: (location, category) -> weekly rate
-# This is the FIX for the winter-coat-in-summer problem: instead of splitting
-# a location's current overall weekly rate by each category's ALL-TIME sales
-# share (which keeps winter items looking "hot" in summer), we use each
-# category's ACTUAL recent (last N weeks) sales rate at that location.
 recent_rate_map = {}
 if USING_SEASONAL_RATES:
     for _, r in df_recent_cat.iterrows():
@@ -383,21 +355,17 @@ for _, loc_row in pos_agg.iterrows():
         cat = cat_row["Category"]
         if not cat or cat in ("nan","","All"): continue
 
-        # ── Stock: real per-location if available, else proportional estimate ──
         real_val = real_stock_map.get((loc, cat))
         if real_val is not None:
             est_stock = max(0, real_val)
             stock_source = "real"
         elif loc in covered_stores:
-            # Location has real stock coverage but this category had no
-            # quant records there at all -> genuinely zero stock, not unknown.
             est_stock = 0
             stock_source = "real"
         else:
             est_stock = cat_row["On_Hand"] * share
             stock_source = "est"
 
-        # ── Weekly rate: recent seasonal data if available, else all-time share ──
         cat_share_of_total = cat_row["Total_Sold"] / total_sold_all if total_sold_all > 0 else 0
         if (loc, cat) in recent_rate_map:
             weekly_rate = recent_rate_map[(loc, cat)]
@@ -408,20 +376,22 @@ for _, loc_row in pos_agg.iterrows():
 
         if weekly_rate < min_weekly_rate: continue
 
-        # Days / weeks of cover
         daily_rate  = weekly_rate / 7
         days_cover  = est_stock / daily_rate if daily_rate > 0 else 999
         weeks_cover = days_cover / 7
 
-        # Reorder quantity
         target_stock = target_weeks * weekly_rate
         reorder_qty  = max(0, round(target_stock - est_stock))
 
-        # Urgency
+        # ── Urgency ──────────────────────────────────────────────────────────
+        # Urgent:       weeks_cover <= 1  (less than 1 week — act now)
+        # Reorder Soon: weeks_cover < target_weeks (strict <, not <=) AND
+        #               reorder_qty >= MIN_REORDER_QTY (gap is meaningful)
+        # OK:           everything else (includes edge cases where gap rounds to 0)
         if weeks_cover <= 1:
             urgency = "🔴 Urgent"
             urgency_key = 0
-        elif weeks_cover <= target_weeks:
+        elif weeks_cover < target_weeks and reorder_qty >= MIN_REORDER_QTY:
             urgency = "🟡 Reorder Soon"
             urgency_key = 1
         else:
@@ -512,10 +482,6 @@ with tab1:
                 season_tag = (f'<span class="src-badge" style="background:#f1f5f9;color:#475569">'
                                f'{r["Season"]} item — off-season</span>')
 
-            # Build the card as a single-line HTML string (no leading
-            # whitespace on any line) — Streamlit's markdown renderer treats
-            # indented lines inside a triple-quoted f-string as a code block,
-            # which is what caused raw HTML tags to show up as text.
             card_html = (
                 f'<div class="reorder-card {css}">'
                 f'<div style="display:flex;justify-content:space-between;align-items:center">'
@@ -552,7 +518,6 @@ with tab2:
     display["Est. Value"] = display["Est. Value"].apply(lambda x: fmt_npr(x))
     st.dataframe(display, use_container_width=True, hide_index=True)
 
-    # Excel download
     if st.button("⬇️ Download reorder plan as Excel"):
         out = BytesIO()
         export_df = df_plan[[
