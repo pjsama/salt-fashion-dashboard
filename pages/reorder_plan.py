@@ -50,9 +50,14 @@ STORE_NAME_FIX = {
 SKIP_PARTS = {"All","Saleable","PoS",""}
 
 def split_cat(raw):
+    """Returns (category, sub_category) from Odoo path like 'Jacket / Fur Regular'."""
     parts = [p.strip() for p in str(raw).split("/") if p.strip() not in SKIP_PARTS]
-    if not parts: return ""
-    return parts[-2] if len(parts) >= 2 else parts[0]
+    if not parts:
+        return "", ""
+    if len(parts) == 1:
+        return parts[0], ""
+    # parts[0] = parent category, parts[1] = sub-category
+    return parts[0], parts[1]
 
 def norm_store(name):
     return STORE_NAME_FIX.get(str(name).strip().lower(), str(name).strip())
@@ -119,9 +124,23 @@ def load_products():
     for col in ["Sales Price","On Hand Qty","Total Units Sold"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    # ── Split Category into parent + sub ──────────────────────────────────────
+    # The export may already have a "Sub Category" column (from odoo_export_products.py)
+    # OR Category may still contain slashes. Handle both cases.
     if "Category" in df.columns:
-        df["Category"] = df["Category"].apply(split_cat)
-    for col in ["Brand","Category","Product Name"]:
+        has_sub_col = "Sub Category" in df.columns
+        has_slashes = df["Category"].str.contains("/", na=False).any()
+
+        if not has_sub_col or has_slashes:
+            split = df["Category"].apply(split_cat)
+            df["Category"]     = split.apply(lambda x: x[0])
+            df["Sub Category"] = split.apply(lambda x: x[1])
+        # If Sub Category already exists and no slashes, leave both columns as-is
+        if "Sub Category" not in df.columns:
+            df["Sub Category"] = ""
+
+    for col in ["Brand","Category","Sub Category","Product Name"]:
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
     return df
@@ -231,7 +250,7 @@ if df_prod is None or df_pos is None:
     st.error("Could not load data. Make sure both product and POS files are on Google Drive.")
     st.stop()
 
-USING_REAL_STOCK = df_locstk is not None and not df_locstk.empty
+USING_REAL_STOCK     = df_locstk is not None and not df_locstk.empty
 USING_SEASONAL_RATES = df_recent_cat is not None and not df_recent_cat.empty
 
 # ── Sidebar ───────────────────────────────────────────────────────────────────
@@ -246,27 +265,37 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**Planning settings**")
     target_weeks = st.slider("Target weeks of cover", 2, 12, 4,
-        help="How many weeks of stock you want to always have. 4 = monthly buying cycle.")
+        help="How many weeks of stock you want to always have.")
     lookback_weeks = st.slider("Sales lookback (weeks)", 2, 12, 4,
         help="How many recent weeks to use for calculating weekly sell rate.")
     min_weekly_rate = st.number_input("Min weekly rate to show (units)", 0, 50, 1,
-        help="Hide categories selling fewer than this per week — filters out very slow movers.")
+        help="Hide categories selling fewer than this per week.")
 
     st.markdown("---")
     locations = ["All"] + [l for l in LOCATION_ORDER if l in df_pos["Location"].unique()]
     sel_loc = st.selectbox("Filter by location", locations)
 
+    # ── Category filter (parent only) ─────────────────────────────────────────
     prod_brand = df_prod[df_prod["Brand"] == sel_brand]
-    cats = ["All"] + sorted([c for c in prod_brand["Category"].unique()
-                              if c and c not in ("nan","")])
-    sel_cat = st.selectbox("Filter by category", cats)
+    parent_cats = sorted([c for c in prod_brand["Category"].unique()
+                          if c and c not in ("nan","")])
+    sel_cat = st.selectbox("Filter by category", ["All"] + parent_cats)
+
+    # ── Sub-category filter (cascades from parent selection) ──────────────────
+    sel_sub_cat = "All"
+    if sel_cat != "All" and "Sub Category" in prod_brand.columns:
+        sub_cats = sorted([s for s in
+                           prod_brand[prod_brand["Category"] == sel_cat]["Sub Category"].unique()
+                           if s and s not in ("nan", "")])
+        if sub_cats:
+            sel_sub_cat = st.selectbox(
+                "Filter by sub-category",
+                ["All"] + sub_cats,
+                help=f"Sub-types within {sel_cat}")
 
     season_options = ["All", "Summer", "Winter", "All-Season"]
     sel_season = st.selectbox("Filter by season", season_options, index=0,
-        help=f"Current season: {CURRENT_SEASON}. Winter items (coats, jackets, "
-             f"sweaters) often show as 'Urgent' in summer due to leftover stock "
-             f"selling slowly — filter to 'Summer' or 'All-Season' to focus on "
-             f"what's actually relevant to buy right now.")
+        help=f"Current season: {CURRENT_SEASON}.")
 
     st.markdown("---")
     if USING_REAL_STOCK:
@@ -275,28 +304,25 @@ with st.sidebar:
         msg = "⚠️ Real location stock not found — using estimated split. "
         if locstk_err:
             msg += f"Error: {locstk_err}. "
-        msg += ("Run `python fetch_location_stock.py`, upload the file to "
-                "Drive, and set GDRIVE_LOCSTK_ID.")
+        msg += "Run `python fetch_location_stock.py` and set GDRIVE_LOCSTK_ID."
         st.warning(msg)
 
     if USING_SEASONAL_RATES:
         st.success("✅ Using current-season sell rates")
     else:
-        msg = "⚠️ Seasonal sales data not found — winter items may show as 'urgent' based on all-time sales. "
+        msg = "⚠️ Seasonal sales data not found — winter items may show as 'urgent'. "
         if recentcat_err:
             msg += f"Error: {recentcat_err}. "
-        msg += ("Run `python fetch_recent_category_sales.py --brand SALT`, "
-                "upload the output to Drive, and set GDRIVE_RECENTCAT_ID.")
+        msg += "Run `python fetch_recent_category_sales.py --brand SALT` and set GDRIVE_RECENTCAT_ID."
         st.warning(msg)
 
     if st.button("🔄 Refresh", use_container_width=True):
         st.cache_data.clear(); st.rerun()
 
 # ── Calculate weekly sell rates from POS data ─────────────────────────────────
-today      = pd.Timestamp.today().normalize()
+today          = pd.Timestamp.today().normalize()
 lookback_start = today - pd.Timedelta(weeks=lookback_weeks)
-
-pos_recent = df_pos[df_pos["Date"] >= lookback_start].copy()
+pos_recent     = df_pos[df_pos["Date"] >= lookback_start].copy()
 
 if "Brand" in pos_recent.columns:
     b_key = "Lush" if "Lush" in sel_brand else "Salt"
@@ -310,35 +336,45 @@ pos_agg = pos_recent.groupby("Location").agg(
     Total_Revenue=(rev_col, "sum"),
     Days=("Date", "nunique"),
 ).reset_index()
-pos_agg["Weekly_Rate"]   = pos_agg["Total_Units"] / lookback_weeks
-pos_agg["Daily_Rate"]    = pos_agg["Total_Units"] / (lookback_weeks * 7)
-pos_agg["Weekly_Revenue"]= pos_agg["Total_Revenue"] / lookback_weeks
+pos_agg["Weekly_Rate"]    = pos_agg["Total_Units"] / lookback_weeks
+pos_agg["Daily_Rate"]     = pos_agg["Total_Units"] / (lookback_weeks * 7)
+pos_agg["Weekly_Revenue"] = pos_agg["Total_Revenue"] / lookback_weeks
 
-# ── Stock per category from product data (fallback / brand total) ─────────────
+# ── Stock per (Category, Sub Category) from product data ─────────────────────
 prod_brand = df_prod[df_prod["Brand"] == sel_brand].copy()
 
-cat_stock = prod_brand.groupby("Category").agg(
+# Aggregate at (Category, Sub Category) level so sub-category is preserved
+group_cols = ["Category", "Sub Category"] if "Sub Category" in prod_brand.columns else ["Category"]
+
+cat_stock = prod_brand.groupby(group_cols).agg(
     On_Hand=("On Hand Qty","sum"),
     Products=("Product Name","nunique"),
     Avg_Price=("Sales Price","mean"),
 ).reset_index()
 
-avg_price_map = cat_stock.set_index("Category")["Avg_Price"].to_dict()
+# Avg price lookup keyed by (Category, Sub Category)
+avg_price_map = {
+    (row["Category"], row.get("Sub Category","")): row["Avg_Price"]
+    for _, row in cat_stock.iterrows()
+}
 
 # ── Build reorder plan ────────────────────────────────────────────────────────
 total_units = pos_agg["Total_Units"].sum()
 pos_agg["Location_Share"] = pos_agg["Total_Units"] / total_units if total_units > 0 else 0
 
-cat_sold = prod_brand.groupby("Category")["Total Units Sold"].sum().reset_index()
-cat_sold.columns = ["Category","Total_Sold"]
-cat_data = cat_stock.merge(cat_sold, on="Category", how="left").fillna(0)
+cat_sold = prod_brand.groupby(group_cols)["Total Units Sold"].sum().reset_index()
+cat_sold.columns = group_cols + ["Total_Sold"]
+cat_data = cat_stock.merge(cat_sold, on=group_cols, how="left").fillna(0)
 total_sold_all = cat_data["Total_Sold"].sum()
 
+# Real stock lookup: (location, category) -> on-hand
+# Note: location_stock only has parent category, so we look up by parent cat
 real_stock_map = {}
 if USING_REAL_STOCK:
     for _, r in df_locstk.iterrows():
         real_stock_map[(r["Location"], r["Category"])] = r["On_Hand_Real"]
 
+# Recent seasonal rate lookup: (location, category) -> weekly rate
 recent_rate_map = {}
 if USING_SEASONAL_RATES:
     for _, r in df_recent_cat.iterrows():
@@ -346,29 +382,46 @@ if USING_SEASONAL_RATES:
 
 rows = []
 for _, loc_row in pos_agg.iterrows():
-    loc   = loc_row["Location"]
-    share = loc_row["Location_Share"]
+    loc             = loc_row["Location"]
+    share           = loc_row["Location_Share"]
     loc_weekly_rate = loc_row["Weekly_Rate"]
     loc_weekly_rev  = loc_row["Weekly_Revenue"]
 
     for _, cat_row in cat_data.iterrows():
-        cat = cat_row["Category"]
+        cat     = cat_row["Category"]
+        sub_cat = cat_row.get("Sub Category", "") if "Sub Category" in cat_row.index else ""
         if not cat or cat in ("nan","","All"): continue
 
+        # ── Stock: real per parent-category if available, else proportional ──
         real_val = real_stock_map.get((loc, cat))
         if real_val is not None:
-            est_stock = max(0, real_val)
+            # When there are multiple sub-cats under one parent, split the
+            # parent-level real stock proportionally by their historical sales.
+            # This is the best we can do — location_stock tracks at category level.
+            sub_sold_total = cat_data[cat_data["Category"] == cat]["Total_Sold"].sum()
+            if sub_sold_total > 0:
+                sub_fraction = cat_row["Total_Sold"] / sub_sold_total
+            else:
+                sub_count    = len(cat_data[cat_data["Category"] == cat])
+                sub_fraction = 1.0 / sub_count if sub_count > 0 else 1.0
+            est_stock    = max(0, real_val * sub_fraction)
             stock_source = "real"
         elif loc in covered_stores:
-            est_stock = 0
+            est_stock    = 0
             stock_source = "real"
         else:
-            est_stock = cat_row["On_Hand"] * share
+            est_stock    = cat_row["On_Hand"] * share
             stock_source = "est"
 
+        # ── Weekly rate: seasonal if available, else all-time share ──────────
         cat_share_of_total = cat_row["Total_Sold"] / total_sold_all if total_sold_all > 0 else 0
         if (loc, cat) in recent_rate_map:
-            weekly_rate = recent_rate_map[(loc, cat)]
+            # Seasonal rate is also at parent-category level — split same way
+            sub_sold_total = cat_data[cat_data["Category"] == cat]["Total_Sold"].sum()
+            sub_fraction_rate = (cat_row["Total_Sold"] / sub_sold_total
+                                 if sub_sold_total > 0 else
+                                 1.0 / max(1, len(cat_data[cat_data["Category"] == cat])))
+            weekly_rate = recent_rate_map[(loc, cat)] * sub_fraction_rate
             rate_source = "seasonal"
         else:
             weekly_rate = loc_weekly_rate * cat_share_of_total
@@ -376,31 +429,27 @@ for _, loc_row in pos_agg.iterrows():
 
         if weekly_rate < min_weekly_rate: continue
 
-        daily_rate  = weekly_rate / 7
-        days_cover  = est_stock / daily_rate if daily_rate > 0 else 999
-        weeks_cover = days_cover / 7
-
+        daily_rate   = weekly_rate / 7
+        days_cover   = est_stock / daily_rate if daily_rate > 0 else 999
+        weeks_cover  = days_cover / 7
         target_stock = target_weeks * weekly_rate
         reorder_qty  = max(0, round(target_stock - est_stock))
 
-        # ── Urgency ──────────────────────────────────────────────────────────
-        # Urgent:       weeks_cover <= 1  (less than 1 week — act now)
-        # Reorder Soon: weeks_cover < target_weeks (strict <, not <=) AND
-        #               reorder_qty >= MIN_REORDER_QTY (gap is meaningful)
-        # OK:           everything else (includes edge cases where gap rounds to 0)
+        # ── Urgency ───────────────────────────────────────────────────────────
         if weeks_cover <= 1:
-            urgency = "🔴 Urgent"
+            urgency     = "🔴 Urgent"
             urgency_key = 0
         elif weeks_cover < target_weeks and reorder_qty >= MIN_REORDER_QTY:
-            urgency = "🟡 Reorder Soon"
+            urgency     = "🟡 Reorder Soon"
             urgency_key = 1
         else:
-            urgency = "🟢 OK"
+            urgency     = "🟢 OK"
             urgency_key = 2
 
         rows.append({
             "Location":      loc,
             "Category":      cat,
+            "Sub Category":  sub_cat,
             "Season":        category_season(cat),
             "Est. Stock":    round(est_stock),
             "Stock Source":  stock_source,
@@ -409,7 +458,7 @@ for _, loc_row in pos_agg.iterrows():
             "Weeks Cover":   round(weeks_cover, 1),
             "Target Stock":  round(target_stock),
             "Reorder Qty":   reorder_qty,
-            "Est. Value":    round(reorder_qty * avg_price_map.get(cat, 0)),
+            "Est. Value":    round(reorder_qty * avg_price_map.get((cat, sub_cat), 0)),
             "Urgency":       urgency,
             "_urgency_key":  urgency_key,
             "_weekly_rev":   loc_weekly_rev * cat_share_of_total if rate_source == "alltime" else 0,
@@ -426,6 +475,8 @@ if sel_loc != "All":
     df_plan = df_plan[df_plan["Location"] == sel_loc]
 if sel_cat != "All":
     df_plan = df_plan[df_plan["Category"] == sel_cat]
+if sel_sub_cat != "All":
+    df_plan = df_plan[df_plan["Sub Category"] == sel_sub_cat]
 if sel_season != "All":
     df_plan = df_plan[df_plan["Season"] == sel_season]
 
@@ -436,23 +487,26 @@ st.title("📦 Reorder Planner")
 src_badge = ('<span class="src-badge" style="background:#dcfce7;color:#166534">Real stock</span>'
               if USING_REAL_STOCK else
               '<span class="src-badge" style="background:#fef3c7;color:#92400e">Estimated stock</span>')
+filter_desc = sel_cat if sel_cat != "All" else "All Categories"
+if sel_sub_cat != "All":
+    filter_desc += f" › {sel_sub_cat}"
 st.markdown(
-    f"{sel_brand} · {target_weeks}-week target cover · Based on last {lookback_weeks} weeks of sales · "
-    f"{today.strftime('%B %d, %Y')} {src_badge}",
+    f"{sel_brand} · {filter_desc} · {target_weeks}-week target · "
+    f"Last {lookback_weeks} weeks · {today.strftime('%B %d, %Y')} {src_badge}",
     unsafe_allow_html=True)
 
 # ── KPI strip ─────────────────────────────────────────────────────────────────
-urgent_count  = len(df_plan[df_plan["_urgency_key"]==0])
-reorder_count = len(df_plan[df_plan["_urgency_key"]<=1])
+urgent_count       = len(df_plan[df_plan["_urgency_key"]==0])
+reorder_count      = len(df_plan[df_plan["_urgency_key"]<=1])
 total_units_needed = df_plan["Reorder Qty"].sum()
 total_value_needed = df_plan["Est. Value"].sum()
 
 c1,c2,c3,c4 = st.columns(4)
 for col, val, lbl, clr in [
-    (c1, f"🔴 {urgent_count}",             "Urgent — under 1 week stock",  "#dc2626"),
-    (c2, f"🟡 {reorder_count-urgent_count}","Reorder Soon — under target",  "#d97706"),
-    (c3, f"{int(total_units_needed):,}",   "Total Units to Reorder",        "#1d4ed8"),
-    (c4, fmt_npr(total_value_needed),      "Est. Reorder Value",            "#374151"),
+    (c1, f"🔴 {urgent_count}",              "Urgent — under 1 week stock", "#dc2626"),
+    (c2, f"🟡 {reorder_count-urgent_count}", "Reorder Soon — under target", "#d97706"),
+    (c3, f"{int(total_units_needed):,}",    "Total Units to Reorder",       "#1d4ed8"),
+    (c4, fmt_npr(total_value_needed),       "Est. Reorder Value",           "#374151"),
 ]:
     with col:
         st.markdown(f'<div class="kpi-box"><p class="kpi-val" style="color:{clr}">{val}</p>'
@@ -470,8 +524,14 @@ with tab1:
     else:
         st.markdown(f"**{len(needs_action)} category-location combinations need action**")
         for _, r in needs_action.iterrows():
-            css = "urgent" if r["_urgency_key"]==0 else "warning"
+            css       = "urgent" if r["_urgency_key"]==0 else "warning"
             weeks_str = f"{r['Weeks Cover']:.1f} weeks" if r['Weeks Cover'] < 99 else "No sales"
+            sub_cat   = r.get("Sub Category","")
+
+            # Category label: "Jacket › Fur Regular" if sub-cat exists
+            cat_label = r["Category"]
+            if sub_cat and sub_cat not in ("","nan"):
+                cat_label = f"{r['Category']} <span style='color:#94a3b8;font-weight:400'>› {sub_cat}</span>"
 
             src_tag = ('<span class="src-badge" style="background:#dcfce7;color:#166534">real stock</span>'
                        if r["Stock Source"]=="real" else
@@ -486,7 +546,7 @@ with tab1:
                 f'<div class="reorder-card {css}">'
                 f'<div style="display:flex;justify-content:space-between;align-items:center">'
                 f'<div>'
-                f'<span style="font-size:14px;font-weight:600;color:#0f172a">{r["Category"]}</span>'
+                f'<span style="font-size:14px;font-weight:600;color:#0f172a">{cat_label}</span>'
                 f'<span style="font-size:12px;color:#64748b;margin-left:8px">📍 {r["Location"]}</span>'
                 f'{season_tag}'
                 f'</div>'
@@ -511,17 +571,19 @@ with tab1:
 with tab2:
     st.markdown("**Full reorder plan — all categories and locations**")
     display = df_plan[[
-        "Urgency","Location","Category","Season","Est. Stock","Stock Source","Weekly Rate",
+        "Urgency","Location","Category","Sub Category","Season",
+        "Est. Stock","Stock Source","Weekly Rate",
         "Weeks Cover","Target Stock","Reorder Qty","Est. Value"
     ]].copy()
     display["Stock Source"] = display["Stock Source"].map({"real":"✅ Real","est":"≈ Estimated"})
-    display["Est. Value"] = display["Est. Value"].apply(lambda x: fmt_npr(x))
+    display["Est. Value"]   = display["Est. Value"].apply(fmt_npr)
     st.dataframe(display, use_container_width=True, hide_index=True)
 
     if st.button("⬇️ Download reorder plan as Excel"):
         out = BytesIO()
         export_df = df_plan[[
-            "Urgency","Location","Category","Season","Est. Stock","Stock Source","Weekly Rate",
+            "Urgency","Location","Category","Sub Category","Season",
+            "Est. Stock","Stock Source","Weekly Rate",
             "Weeks Cover","Target Stock","Reorder Qty","Est. Value"
         ]].copy()
         export_df.to_excel(out, index=False, engine="openpyxl")
@@ -552,3 +614,25 @@ with tab3:
         "Reorder_Soon":"Reorder Soon",
     })
     st.dataframe(loc_summary, use_container_width=True, hide_index=True)
+
+    # Sub-category breakdown when a parent is selected
+    if sel_cat != "All":
+        st.markdown(f"**Sub-category breakdown — {sel_cat}**")
+        sub_summary = df_plan.groupby("Sub Category").agg(
+            Locations=("Location","nunique"),
+            Urgent=("_urgency_key", lambda x: (x==0).sum()),
+            Reorder_Soon=("_urgency_key", lambda x: (x==1).sum()),
+            Total_Units=("Reorder Qty","sum"),
+            Total_Value=("Est. Value","sum"),
+            Avg_Weeks_Cover=("Weeks Cover","mean"),
+        ).reset_index()
+        sub_summary = sub_summary.sort_values("Total_Units", ascending=False)
+        sub_summary["Total_Value"]      = sub_summary["Total_Value"].apply(fmt_npr)
+        sub_summary["Avg_Weeks_Cover"]  = sub_summary["Avg_Weeks_Cover"].round(1)
+        sub_summary = sub_summary.rename(columns={
+            "Total_Units":"Units to Reorder",
+            "Total_Value":"Est. Value",
+            "Reorder_Soon":"Reorder Soon",
+            "Avg_Weeks_Cover":"Avg Weeks Cover",
+        })
+        st.dataframe(sub_summary, use_container_width=True, hide_index=True)
