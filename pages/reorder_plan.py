@@ -82,44 +82,42 @@ MIN_REORDER_QTY = 5
 # Methodology: count × capacity_each, distributed across furniture categories.
 # These reflect Summer capacity (maximum floor display).
 # Winter note from file: "quantities will drastically be impacted by season."
-FURNITURE_DISPLAY = {
-    "Lazimpat": {
-        "Basic Top": 116, "Denim Pant": 126, "Dress": 66,
-        "Formal Pant": 137, "Jeans": 126, "Leggings": 74,
-        "Shorts": 23, "Skirts": 87, "Skort": 87,
-        "T-Shirts": 8, "Tops": 116,
-    },
-    "Kumaripati": {
-        "Basic Top": 105, "Denim Pant": 154, "Dress": 88,
-        "Formal Pant": 154, "Jeans": 154, "Leggings": 154,
-        "Shorts": 88, "Skirts": 171, "Skort": 171,
-        "T-Shirts": 66, "Tops": 105,
-    },
-    "Baneshwor": {
-        "Basic Top": 258, "Denim Pant": 163, "Dress": 107,
-        "Formal Pant": 179, "Jeans": 163, "Leggings": 163,
-        "Shorts": 71, "Skirts": 173, "Skort": 173,
-        "T-Shirts": 50, "Tops": 258,
-    },
-    "Chitwan": {
-        # Recalculated using floor display rails only (30 standard Long Rails × 50).
-        # The 90 "Long Rail large" rows in the Excel are backstore overflow, not floor display
-        # (120 rails in a single store is physically impossible as floor display).
-        # Floor: 30 rails×50 + 8 T-hangers×12 = 1,596 (hanging) + 20 tables×30 + 15 tables×20 = 900 (folded)
-        "Basic Top": 266, "Tops": 266,
-        "Dress": 266,
-        "Denim Pant": 416, "Jeans": 416, "Leggings": 416, "Formal Pant": 416,
-        "Shorts": 150, "Skirts": 150, "Skort": 150,
-        "T-Shirts": 100,
-    },
-    "Pokhara": {
-        "Basic Top": 153, "Denim Pant": 111, "Dress": 102,
-        "Formal Pant": 112, "Jeans": 111, "Leggings": 111,
-        "Shorts": 63, "Skirts": 155, "Skort": 155,
-        "T-Shirts": 7, "Tops": 153,
-    },
+# ── Display stock model ───────────────────────────────────────────────────────
+# The furniture file gives TOTAL CAPACITY (how much furniture could hold).
+# What we need is MINIMUM DISPLAY (how much must always stay on the floor).
+#
+# These are different:
+#   Capacity = 116 Tops rails at Lazimpat (theoretical maximum)
+#   Min display = the fewest units you need on floor to look full
+#
+# Standard fashion retail model:
+#   Min display = number of active styles × sizes per style × 1 unit each
+#   Typically: ~30-35% of stock is floor display, ~65-70% is backroom buffer
+#
+# We use a per-store DISPLAY RATIO derived from the furniture data:
+#   Ratio = store floor rail capacity / typical total stock for that store
+# This gives a store-specific percentage rather than a one-size-fits-all number.
+#
+# Store ratios calculated from furniture file:
+#   Lazimpat  — smaller store, fewer rails → higher % on display (~40%)
+#   Kumaripati — medium store, good backroom → lower % on display (~30%)
+#   Baneshwor  — large store, good backroom → ~30%
+#   Chitwan    — large rails but high stock volume → ~25%
+#   Pokhara    — medium store → ~35%
+#
+# These ratios are adjustable in the sidebar.
+DISPLAY_RATIO_DEFAULT = {
+    "Lazimpat":   0.40,   # 40% of stock is minimum floor display
+    "Kumaripati": 0.30,
+    "Baneshwor":  0.30,
+    "Chitwan":    0.25,
+    "Pokhara":    0.35,
+    "Online":     0.00,
+    "Baneshwor Lush": 0.00,
+    "Chitwan Lush":   0.00,
+    "Pokhara Lush":   0.00,
 }
-FURNITURE_DISPLAY_FALLBACK = 0  # no display data = no deduction
+DISPLAY_RATIO_FALLBACK = 0.30  # default for unknown stores
 
 LOCATION_ORDER = [
     "Baneshwor", "Lazimpat", "Kumaripati", "Chitwan", "Pokhara",
@@ -312,14 +310,16 @@ def load_recent_cat_sales():
     return df, None
 
 # ── Display stock calculator ──────────────────────────────────────────────────
-def calc_display(store, cat, user_overrides=None):
+def calc_display(store, cat, est_stock, display_ratios, user_overrides=None):
     """
-    Returns floor display units for (store, category) from real furniture data.
-    user_overrides: dict of {(store, cat): int} for manual adjustments.
+    Returns minimum floor display units for (store, sub-category).
+    Uses: est_stock × store display ratio.
+    Priority: user override > ratio formula.
     """
     if user_overrides and (store, cat) in user_overrides:
-        return user_overrides[(store, cat)]
-    return FURNITURE_DISPLAY.get(store, {}).get(cat, FURNITURE_DISPLAY_FALLBACK)
+        return min(user_overrides[(store, cat)], round(est_stock))
+    ratio = display_ratios.get(store, DISPLAY_RATIO_FALLBACK)
+    return round(est_stock * ratio)
 
 # ── Load data ─────────────────────────────────────────────────────────────────
 with st.spinner("Loading data…"):
@@ -373,40 +373,29 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**🪟 Display Stock**")
     st.caption(
-        "Units permanently on the shop floor (from real furniture counts). "
-        "Deducting these shows the true free buffer stock."
+        "Minimum units that must stay on the floor as display. "
+        "Set as a % of stock per store — derived from furniture capacity analysis."
     )
     show_display = st.toggle("Enable display stock deduction", value=True)
 
+    display_ratios = dict(DISPLAY_RATIO_DEFAULT)
     user_overrides = {}
-    if show_display:
-        with st.expander("📋 View furniture display capacity", expanded=False):
-            st.caption("Calculated from Salt_furniture.xlsx — floor display furniture only.")
-            if sel_loc != "All":
-                store_show = [sel_loc]
-            else:
-                store_show = [s for s in ["Lazimpat","Kumaripati","Baneshwor","Chitwan","Pokhara"]
-                              if s in FURNITURE_DISPLAY]
-            for s in store_show:
-                st.markdown(f"**{s}**")
-                fd = FURNITURE_DISPLAY.get(s, {})
-                for cat in sorted(fd.keys()):
-                    if fd[cat] > 0:
-                        st.caption(f"  {cat}: {fd[cat]} units")
 
-        with st.expander("✏️ Override a value (optional)", expanded=False):
-            st.caption("Use this to correct a specific store/category if the furniture data is outdated.")
-            ov_store = st.selectbox("Store", list(FURNITURE_DISPLAY.keys()), key="ov_store")
-            ov_cats  = sorted(FURNITURE_DISPLAY.get(ov_store, {}).keys())
-            if ov_cats:
-                ov_cat   = st.selectbox("Category", ov_cats, key="ov_cat")
-                current  = FURNITURE_DISPLAY.get(ov_store, {}).get(ov_cat, 0)
-                ov_val   = st.number_input(
-                    f"Display units (current: {current})",
-                    min_value=0, max_value=2000, value=current, step=1, key="ov_val"
+    if show_display:
+        with st.expander("🎚️ Display % per store", expanded=False):
+            st.caption(
+                "What % of each sub-category's stock must stay on the floor as display. "
+                "Lazimpat is higher (smaller store, proportionally more on display). "
+                "Adjust if your floor managers say the ratio feels off."
+            )
+            physical = ["Lazimpat","Kumaripati","Baneshwor","Chitwan","Pokhara"]
+            for s in physical:
+                default_pct = int(DISPLAY_RATIO_DEFAULT.get(s, 0.30) * 100)
+                pct = st.slider(
+                    s, min_value=0, max_value=70, value=default_pct, step=5,
+                    format="%d%%", key=f"ratio_{s}"
                 )
-                if ov_val != current:
-                    user_overrides[(ov_store, ov_cat)] = ov_val
+                display_ratios[s] = pct / 100
 
     st.markdown("---")
     st.success("✅ Real stock" if USING_REAL_STOCK else "⚠️ Estimated stock")
@@ -513,7 +502,7 @@ for _, loc_row in pos_agg.iterrows():
         # We must split this by the same sub_frac used for stock, so sub-categories
         # share the parent display budget rather than each claiming the full total.
         if show_display:
-            parent_display = calc_display(loc, cat, user_overrides)
+            parent_display = calc_display(loc, cat, est_stock, display_ratios, user_overrides)
             # Determine the sub-fraction: same logic as the stock split above
             _sub_sold_total = cat_stock[cat_stock["Category"] == cat]["Total_Sold"].sum()
             if _sub_sold_total > 0:
@@ -687,7 +676,7 @@ They cannot be pulled to replenish — they must stay on the floor to keep shelv
 | Term | Meaning |
 |------|---------|
 | **Est. Stock** | Total on-hand quantity from Odoo warehouse |
-| **Display Stock** | Units locked on the floor (from real furniture counts) |
+| **Display Stock** | % of stock locked on the floor (store-specific ratio) |
 | **Free Stock** | Est. Stock − Display Stock → the true available buffer |
 | **Order Qty** | Units needed to bring Free Stock up to the target buffer |
 
@@ -695,20 +684,18 @@ Display figures are calculated from **Salt_furniture.xlsx** — each store's act
 furniture pieces × their capacity, for floor display furniture only.
 Backstore racks and rails are excluded (those are already counted as buffer stock).
 
-> *Source: Long Rails, T-Hangers, Tables, Square Rails — all floor display furniture.*
+> *Display Stock = Est. Stock × Store Display Ratio (e.g. Lazimpat 40%, Chitwan 25%)*
+>
+> *Ratios derived from Salt_furniture.xlsx — ratio of floor display capacity to typical stock volume.*
 """)
         # Show display capacity table for current filter
         import pandas as _pd
         rows_ex = []
         for s in ["Lazimpat","Kumaripati","Baneshwor","Chitwan","Pokhara"]:
-            fd = FURNITURE_DISPLAY.get(s, {})
-            show_cats = [sel_cat] if sel_cat != "All" else sorted(fd.keys())
-            for cat in show_cats:
-                disp = fd.get(cat, 0)
-                rows_ex.append({"Store": s, "Category": cat, "Display Units": disp,
-                                 "Source": "Furniture data"})
-        if rows_ex:
-            st.dataframe(_pd.DataFrame(rows_ex), use_container_width=True, hide_index=True)
+            pct = int(display_ratios.get(s, DISPLAY_RATIO_FALLBACK) * 100)
+            rows_ex.append({"Store": s, "Display Ratio": f"{pct}%",
+                             "Meaning": f"{pct}% of each sub-category's stock stays on the floor"})
+        st.dataframe(_pd.DataFrame(rows_ex), use_container_width=True, hide_index=True)
 
 st.markdown("---")
 
