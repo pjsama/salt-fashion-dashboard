@@ -24,6 +24,7 @@ st.markdown("""
 .card-urgent  { border-left: 5px solid #dc2626 }
 .card-warning { border-left: 5px solid #f59e0b }
 .card-ok      { border-left: 5px solid #16a34a }
+.card-watch   { border-left: 5px solid #f97316 }
 
 /* KPI boxes */
 .kpi {
@@ -74,7 +75,7 @@ GDRIVE_LOCSTK_ID    = "1zgTBhh7vOTjxEIz-LO3YSM-TXJeDUrBT"
 GDRIVE_RECENTCAT_ID = "1EMEw10v7zEwsMzrocJWCjkyRfy14LaIM"
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-MIN_REORDER_QTY = 5
+MIN_REORDER_QTY = 1
 
 # ── Real furniture-based display capacity per store per category ──────────────
 # Source: Salt_furniture.xlsx — floor display furniture only.
@@ -513,20 +514,28 @@ for _, loc_row in pos_agg.iterrows():
         reorder_qty_adj = max(0, round(target_stock - free_stock))
 
         # Urgency (raw)
+        # 🔴 Urgent    = under 1 week cover
+        # 🟡 Reorder   = under target AND gap >= 5 units (meaningful reorder)
+        # ⚠️ Watch     = under target AND gap 1-4 units (low-stock sub-cat, flag but don't overstate)
+        # 🟢 OK        = at or above target
         if weeks_cover <= 1:
             urgency, uk = "🔴 Urgent", 0
-        elif weeks_cover < target_weeks and reorder_qty >= MIN_REORDER_QTY:
+        elif weeks_cover < target_weeks and reorder_qty >= 5:
             urgency, uk = "🟡 Reorder Soon", 1
+        elif weeks_cover < target_weeks and reorder_qty >= MIN_REORDER_QTY:
+            urgency, uk = "⚠️ Watch", 2
         else:
-            urgency, uk = "🟢 OK", 2
+            urgency, uk = "🟢 OK", 3
 
-        # Urgency (adjusted)
+        # Urgency (adjusted — using free stock after display deduction)
         if weeks_cover_adj <= 1:
             urgency_adj, uk_adj = "🔴 Urgent", 0
-        elif weeks_cover_adj < target_weeks and reorder_qty_adj >= MIN_REORDER_QTY:
+        elif weeks_cover_adj < target_weeks and reorder_qty_adj >= 5:
             urgency_adj, uk_adj = "🟡 Reorder Soon", 1
+        elif weeks_cover_adj < target_weeks and reorder_qty_adj >= MIN_REORDER_QTY:
+            urgency_adj, uk_adj = "⚠️ Watch", 2
         else:
-            urgency_adj, uk_adj = "🟢 OK", 2
+            urgency_adj, uk_adj = "🟢 OK", 3
 
         rows.append({
             "Location":           loc,
@@ -591,25 +600,28 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ── KPI section ───────────────────────────────────────────────────────────────
 # Raw KPIs
 urgent_n     = (df_plan["_uk"] == 0).sum()
-reorder_n    = (df_plan["_uk"] <= 1).sum()
+reorder_n    = (df_plan["_uk"] == 1).sum()
+watch_n      = (df_plan["_uk"] == 2).sum()
 units_raw    = int(df_plan["Reorder Qty"].sum())
 value_raw    = df_plan["Est. Value"].sum()
 
 # Adjusted KPIs
 urgent_n_adj  = (df_plan["_uk_adj"] == 0).sum()
-reorder_n_adj = (df_plan["_uk_adj"] <= 1).sum()
+reorder_n_adj = (df_plan["_uk_adj"] == 1).sum()
+watch_n_adj   = (df_plan["_uk_adj"] == 2).sum()
 units_adj     = int(df_plan["Reorder Qty (Adj)"].sum())
 value_adj     = df_plan["Est. Value (Adj)"].sum()
 
 if show_display:
     # Two rows: raw on top, adjusted (purple) below
     st.markdown('<p class="section-label">Without display stock (raw)</p>', unsafe_allow_html=True)
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     for col, val, lbl, clr in [
-        (c1, f"🔴 {urgent_n}",          "Urgent (under 1 week)",    "#dc2626"),
-        (c2, f"🟡 {reorder_n-urgent_n}", "Reorder Soon",             "#d97706"),
-        (c3, f"{units_raw:,}",          "Units to Order",            "#1d4ed8"),
-        (c4, fmt_npr(value_raw),        "Estimated Value",           "#374151"),
+        (c1, f"🔴 {urgent_n}",   "Urgent (under 1 week)",    "#dc2626"),
+        (c2, f"🟡 {reorder_n}",  "Reorder Soon",             "#d97706"),
+        (c3, f"⚠️ {watch_n}",   "Watch — small gap",         "#f97316"),
+        (c4, f"{units_raw:,}",   "Units to Order",            "#1d4ed8"),
+        (c5, fmt_npr(value_raw), "Estimated Value",           "#374151"),
     ]:
         with col:
             st.markdown(
@@ -625,12 +637,13 @@ if show_display:
         '🪟 After display stock deduction (adjusted — supervisor view)</p>',
         unsafe_allow_html=True,
     )
-    d1, d2, d3, d4 = st.columns(4)
+    d1, d2, d3, d4, d5 = st.columns(5)
     for col, val, lbl, clr in [
-        (d1, f"🔴 {urgent_n_adj}",              "Urgent (under 1 week)",    "#dc2626"),
-        (d2, f"🟡 {reorder_n_adj-urgent_n_adj}", "Reorder Soon",             "#d97706"),
-        (d3, f"{units_adj:,}",                  "Units to Order (Adj)",     "#1d4ed8"),
-        (d4, fmt_npr(value_adj),                "Estimated Value (Adj)",    "#374151"),
+        (d1, f"🔴 {urgent_n_adj}",   "Urgent (under 1 week)",    "#dc2626"),
+        (d2, f"🟡 {reorder_n_adj}",  "Reorder Soon",             "#d97706"),
+        (d3, f"⚠️ {watch_n_adj}",   "Watch — small gap",         "#f97316"),
+        (d4, f"{units_adj:,}",       "Units to Order (Adj)",      "#1d4ed8"),
+        (d5, fmt_npr(value_adj),     "Estimated Value (Adj)",     "#374151"),
     ]:
         with col:
             st.markdown(
@@ -640,12 +653,13 @@ if show_display:
                 unsafe_allow_html=True,
             )
 else:
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     for col, val, lbl, clr in [
-        (c1, f"🔴 {urgent_n}",          "Urgent — under 1 week",    "#dc2626"),
-        (c2, f"🟡 {reorder_n-urgent_n}", "Reorder Soon",             "#d97706"),
-        (c3, f"{units_raw:,}",          "Total Units to Order",      "#1d4ed8"),
-        (c4, fmt_npr(value_raw),        "Estimated Value",           "#374151"),
+        (c1, f"🔴 {urgent_n}",    "Urgent — under 1 week",    "#dc2626"),
+        (c2, f"🟡 {reorder_n}",   "Reorder Soon",             "#d97706"),
+        (c3, f"⚠️ {watch_n}",    "Watch — small gap",         "#f97316"),
+        (c4, f"{units_raw:,}",    "Total Units to Order",      "#1d4ed8"),
+        (c5, fmt_npr(value_raw),  "Estimated Value",           "#374151"),
     ]:
         with col:
             st.markdown(
@@ -696,7 +710,7 @@ tab1, tab2, tab3 = st.tabs(["🔴 Urgent & Reorder", "📊 Full Plan", "📍 By 
 # ── Tab 1: Action list ────────────────────────────────────────────────────────
 with tab1:
     action_key = "_uk_adj" if show_display else "_uk"
-    needs_action = df_plan[df_plan[action_key] <= 1].copy()
+    needs_action = df_plan[df_plan[action_key] <= 2].copy()
 
     if needs_action.empty:
         st.success("✅ All categories have sufficient cover — no urgent reorders.")
@@ -707,7 +721,7 @@ with tab1:
 
         for _, r in needs_action.iterrows():
             uk   = r["_uk_adj"] if show_display else r["_uk"]
-            css  = "card-urgent" if uk == 0 else "card-warning"
+            css  = "card-urgent" if uk == 0 else ("card-warning" if uk == 1 else "card-watch")
 
             # Category label with sub-category
             cat_label = r["Category"]
