@@ -368,7 +368,20 @@ with st.sidebar:
         if sub_cats:
             sel_sub_cat = st.selectbox("Sub-category", ["All"] + sub_cats)
 
-    sel_season = st.selectbox("Season", ["All","Summer","Winter","All-Season"])
+    SEASON_OPTIONS = ["All", "Summer (+ All-Season)", "Winter (+ All-Season)", "All-Season only"]
+    sel_season_raw = st.selectbox(
+        "Season",
+        SEASON_OPTIONS,
+        index=1,  # default to Summer
+        help="Summer and Winter both include All-Season items (Denim, Leggings etc.)"
+    )
+    # Map to filter values
+    sel_season = {
+        "All":                      "All",
+        "Summer (+ All-Season)":    "Summer",
+        "Winter (+ All-Season)":    "Winter",
+        "All-Season only":          "All-Season",
+    }[sel_season_raw]
 
     # ── Display stock ──────────────────────────────────────────────────────────
     st.markdown("---")
@@ -492,6 +505,11 @@ for _, loc_row in pos_agg.iterrows():
 
         if weekly_rate < min_weekly_rate: continue
 
+        # Skip rows with zero estimated stock — these are already out of stock.
+        # Zero stock + any sell rate = infinite urgency, which is misleading noise.
+        # Out-of-stock items need a buying/procurement decision, not a reorder.
+        if est_stock < 1: continue
+
         daily_rate   = weekly_rate / 7
         weeks_cover  = (est_stock / daily_rate / 7) if daily_rate > 0 else 999
         target_stock = target_weeks * weekly_rate
@@ -572,7 +590,13 @@ if df_plan.empty:
 if sel_loc     != "All": df_plan = df_plan[df_plan["Location"]     == sel_loc]
 if sel_cat     != "All": df_plan = df_plan[df_plan["Category"]     == sel_cat]
 if sel_sub_cat != "All": df_plan = df_plan[df_plan["Sub Category"] == sel_sub_cat]
-if sel_season  != "All": df_plan = df_plan[df_plan["Season"]       == sel_season]
+# Season filter: Summer/Winter shows that season PLUS All-Season items
+# All-Season items (Denim Pant, Leggings, Jeans) are year-round — always visible
+if sel_season != "All":
+    df_plan = df_plan[
+        (df_plan["Season"] == sel_season) |
+        (df_plan["Season"] == "All-Season")
+    ]
 
 # Sort by adjusted urgency when display is on, raw urgency otherwise
 sort_key = "_uk_adj" if show_display else "_uk"
