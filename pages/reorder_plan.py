@@ -102,10 +102,15 @@ FURNITURE_DISPLAY = {
         "T-Shirts": 50, "Tops": 258,
     },
     "Chitwan": {
-        "Basic Top": 1526, "Denim Pant": 1655, "Dress": 1526,
-        "Formal Pant": 1655, "Jeans": 1655, "Leggings": 1655,
-        "Shorts": 138, "Skirts": 1655, "Skort": 1655,
-        "Tops": 1526,
+        # Recalculated using floor display rails only (30 standard Long Rails × 50).
+        # The 90 "Long Rail large" rows in the Excel are backstore overflow, not floor display
+        # (120 rails in a single store is physically impossible as floor display).
+        # Floor: 30 rails×50 + 8 T-hangers×12 = 1,596 (hanging) + 20 tables×30 + 15 tables×20 = 900 (folded)
+        "Basic Top": 266, "Tops": 266,
+        "Dress": 266,
+        "Denim Pant": 416, "Jeans": 416, "Leggings": 416, "Formal Pant": 416,
+        "Shorts": 150, "Skirts": 150, "Skort": 150,
+        "T-Shirts": 100,
     },
     "Pokhara": {
         "Basic Top": 153, "Denim Pant": 111, "Dress": 102,
@@ -519,6 +524,10 @@ for _, loc_row in pos_agg.iterrows():
             display_units = round(parent_display * _display_frac)
         else:
             display_units = 0
+        # Cap display at est_stock — can't display more than you own.
+        # When display >= est_stock it means all stock is on the floor,
+        # nothing is in the back room. Free stock = 0 is correct in that case.
+        display_units  = min(display_units, round(est_stock))
         free_stock     = max(0, est_stock - display_units)
         weeks_cover_adj = (free_stock / daily_rate / 7) if daily_rate > 0 else 999
         reorder_qty_adj = max(0, round(target_stock - free_stock))
