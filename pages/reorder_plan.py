@@ -713,14 +713,12 @@ with tab1:
                     # Weeks cover adj
                     f'<div><div style="font-size:10px;color:#7c3aed">Weeks Cover (adj)</div>'
                     f'<div style="font-size:15px;font-weight:700;color:{"#dc2626" if uk==0 else "#d97706"}">'
-                    f'{r["Weeks Cover (Adj)"]:.1f} wks'
-                    f'<span style="font-size:10px;color:#94a3b8;font-weight:400"> raw {r["Weeks Cover"]:.1f}</span>'
+                    + ("Out of stock" if r["Weeks Cover (Adj)"] == 0 else f"{r['Weeks Cover (Adj)']:.1f} wks") +
                     f'</div></div>',
                     # Reorder adj
-                    f'<div><div style="font-size:10px;color:#7c3aed">Reorder Qty (adj)</div>'
+                    f'<div><div style="font-size:10px;color:#7c3aed">Order Qty</div>'
                     f'<div style="font-size:15px;font-weight:700;color:#1d4ed8">'
-                    f'{int(r["Reorder Qty (Adj)"]):,}'
-                    f'<span style="font-size:10px;color:#94a3b8;font-weight:400"> raw {int(r["Reorder Qty"]):,}</span>'
+                    f'{int(r["Reorder Qty (Adj)"]):,} units'
                     f'</div></div>',
                     '</div>',
                 ])
@@ -756,32 +754,47 @@ with tab1:
 
 # ── Tab 2: Full table ─────────────────────────────────────────────────────────
 with tab2:
+    # Always show the clean supervisor view — adjusted figures only when display is on.
+    # "Est. Stock" is kept as context; raw Reorder Qty / Weeks Cover are hidden to avoid confusion.
     if show_display:
-        st.info("🪟 Display stock enabled — both raw and adjusted figures shown.")
-        cols = [
+        # Build a clean renamed copy so column headers read naturally
+        tbl = df_plan[[
             "Urgency (Adj)", "Location", "Category", "Sub Category", "Season",
             "Est. Stock", "Display Stock", "Free Stock", "Stock Source",
-            "Weekly Rate", "Weeks Cover", "Weeks Cover (Adj)",
-            "Target Stock", "Reorder Qty", "Reorder Qty (Adj)",
-            "Est. Value", "Est. Value (Adj)",
-        ]
+            "Weekly Rate", "Weeks Cover (Adj)", "Target Stock",
+            "Reorder Qty (Adj)", "Est. Value (Adj)",
+        ]].copy().rename(columns={
+            "Urgency (Adj)":    "Status",
+            "Free Stock":       "Free Stock ✓",
+            "Weeks Cover (Adj)":"Weeks Cover",
+            "Reorder Qty (Adj)":"Order Qty",
+            "Est. Value (Adj)": "Est. Value",
+        })
+        tbl["Stock Source"]  = tbl["Stock Source"].map({"real":"✅ Real","est":"≈ Est."})
+        tbl["Est. Value"]    = tbl["Est. Value"].apply(fmt_npr)
+        tbl["Weeks Cover"]   = tbl["Weeks Cover"].apply(
+            lambda x: "Out of stock" if x == 0 else f"{x:.1f} wks"
+        )
+        st.caption(
+            "🪟 Display stock deducted — **Order Qty** and **Weeks Cover** reflect "
+            "only the free (non-display) stock. Est. Stock shown for reference."
+        )
     else:
-        cols = [
+        tbl = df_plan[[
             "Urgency", "Location", "Category", "Sub Category", "Season",
             "Est. Stock", "Stock Source", "Weekly Rate",
             "Weeks Cover", "Target Stock", "Reorder Qty", "Est. Value",
-        ]
+        ]].copy().rename(columns={"Urgency": "Status", "Reorder Qty": "Order Qty"})
+        tbl["Stock Source"] = tbl["Stock Source"].map({"real":"✅ Real","est":"≈ Est."})
+        tbl["Est. Value"]   = tbl["Est. Value"].apply(fmt_npr)
+        tbl["Weeks Cover"]  = tbl["Weeks Cover"].apply(
+            lambda x: "Out of stock" if x == 0 else f"{x:.1f} wks"
+        )
 
-    display_df = df_plan[[c for c in cols if c in df_plan.columns]].copy()
-    display_df["Stock Source"] = display_df["Stock Source"].map({"real":"✅ Real","est":"≈ Est."})
-    for vc in ["Est. Value", "Est. Value (Adj)"]:
-        if vc in display_df.columns:
-            display_df[vc] = display_df[vc].apply(fmt_npr)
-
-    st.dataframe(display_df, use_container_width=True, hide_index=True)
+    st.dataframe(tbl, use_container_width=True, hide_index=True)
 
     out = BytesIO()
-    df_plan[[c for c in cols if c in df_plan.columns]].to_excel(out, index=False, engine="openpyxl")
+    tbl.to_excel(out, index=False, engine="openpyxl")
     out.seek(0)
     st.download_button(
         "⬇️ Download as Excel",
