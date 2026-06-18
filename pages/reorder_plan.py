@@ -497,25 +497,16 @@ for _, loc_row in pos_agg.iterrows():
         reorder_qty  = max(0, round(target_stock - est_stock))
 
         # Display stock
-        # The furniture data holds the TOTAL display capacity for the parent category
-        # (e.g. Lazimpat Tops = 116 total units across ALL Tops sub-categories).
-        # We must split this by the same sub_frac used for stock, so sub-categories
-        # share the parent display budget rather than each claiming the full total.
+        # Display stock = store_ratio × est_stock for THIS sub-category directly.
+        # No parent/sub splitting — every sub-category gets the same % of its own stock
+        # reserved as floor display, regardless of its sales ranking vs other sub-cats.
+        # This ensures consistent display percentages (e.g. always 30% at Kumaripati)
+        # rather than rare styles getting near-zero display just because they sell less.
         if show_display:
-            parent_display = calc_display(loc, cat, est_stock, display_ratios, user_overrides)
-            # Determine the sub-fraction: same logic as the stock split above
-            _sub_sold_total = cat_stock[cat_stock["Category"] == cat]["Total_Sold"].sum()
-            if _sub_sold_total > 0:
-                _display_frac = cat_row["Total_Sold"] / _sub_sold_total
-            else:
-                _n_subs = len(cat_stock[cat_stock["Category"] == cat])
-                _display_frac = 1.0 / _n_subs if _n_subs > 0 else 1.0
-            display_units = round(parent_display * _display_frac)
+            display_units = calc_display(loc, cat, est_stock, display_ratios, user_overrides)
         else:
             display_units = 0
-        # Cap display at est_stock — can't display more than you own.
-        # When display >= est_stock it means all stock is on the floor,
-        # nothing is in the back room. Free stock = 0 is correct in that case.
+        # Safety cap: display can never exceed what you actually own
         display_units  = min(display_units, round(est_stock))
         free_stock     = max(0, est_stock - display_units)
         weeks_cover_adj = (free_stock / daily_rate / 7) if daily_rate > 0 else 999
