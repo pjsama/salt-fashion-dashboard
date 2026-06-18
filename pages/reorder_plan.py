@@ -76,27 +76,45 @@ GDRIVE_RECENTCAT_ID = "1EMEw10v7zEwsMzrocJWCjkyRfy14LaIM"
 # ── Constants ─────────────────────────────────────────────────────────────────
 MIN_REORDER_QTY = 5
 
-STORE_AREA = {
-    "Baneshwor":  2800,
-    "Pokhara":    2800,
-    "Kumaripati": 2200,
-    "Lazimpat":   2000,
-    "Chitwan":     500,
-    "Online":        0,
-    "Baneshwor Lush": 0,
-    "Chitwan Lush":   0,
-    "Pokhara Lush":   0,
+# ── Real furniture-based display capacity per store per category ──────────────
+# Source: Salt_furniture.xlsx — floor display furniture only.
+# Excludes "4 Step rack" (backstore storage) and "Hanging fix rail on backstore".
+# Methodology: count × capacity_each, distributed across furniture categories.
+# These reflect Summer capacity (maximum floor display).
+# Winter note from file: "quantities will drastically be impacted by season."
+FURNITURE_DISPLAY = {
+    "Lazimpat": {
+        "Basic Top": 116, "Denim Pant": 126, "Dress": 66,
+        "Formal Pant": 137, "Jeans": 126, "Leggings": 74,
+        "Shorts": 23, "Skirts": 87, "Skort": 87,
+        "T-Shirts": 8, "Tops": 116,
+    },
+    "Kumaripati": {
+        "Basic Top": 105, "Denim Pant": 154, "Dress": 88,
+        "Formal Pant": 154, "Jeans": 154, "Leggings": 154,
+        "Shorts": 88, "Skirts": 171, "Skort": 171,
+        "T-Shirts": 66, "Tops": 105,
+    },
+    "Baneshwor": {
+        "Basic Top": 258, "Denim Pant": 163, "Dress": 107,
+        "Formal Pant": 179, "Jeans": 163, "Leggings": 163,
+        "Shorts": 71, "Skirts": 173, "Skort": 173,
+        "T-Shirts": 50, "Tops": 258,
+    },
+    "Chitwan": {
+        "Basic Top": 1526, "Denim Pant": 1655, "Dress": 1526,
+        "Formal Pant": 1655, "Jeans": 1655, "Leggings": 1655,
+        "Shorts": 138, "Skirts": 1655, "Skort": 1655,
+        "Tops": 1526,
+    },
+    "Pokhara": {
+        "Basic Top": 153, "Denim Pant": 111, "Dress": 102,
+        "Formal Pant": 112, "Jeans": 111, "Leggings": 111,
+        "Shorts": 63, "Skirts": 155, "Skort": 155,
+        "T-Shirts": 7, "Tops": 153,
+    },
 }
-MAX_AREA = max(v for v in STORE_AREA.values() if v > 0)
-
-DEFAULT_DISPLAY_BASE = {
-    "Tops": 30, "Dress": 25, "Denim Pant": 20, "Shorts": 20,
-    "Skirt": 20, "Skort": 15, "Basic Top": 20, "Co-Ord Set": 15,
-    "Jacket": 15, "Coat": 12, "Sweater": 12, "Cardigan": 12,
-    "Sweatshirt": 10, "Hoodie": 10, "Leggings": 15,
-    "Jeans": 20, "T-Shirts": 20, "Fashion Accessories": 10,
-}
-DEFAULT_DISPLAY_FALLBACK = 10
+FURNITURE_DISPLAY_FALLBACK = 0  # no display data = no deduction
 
 LOCATION_ORDER = [
     "Baneshwor", "Lazimpat", "Kumaripati", "Chitwan", "Pokhara",
@@ -289,11 +307,14 @@ def load_recent_cat_sales():
     return df, None
 
 # ── Display stock calculator ──────────────────────────────────────────────────
-def calc_display(store, cat, display_base):
-    area = STORE_AREA.get(store, 0)
-    if area == 0: return 0
-    base = display_base.get(cat, DEFAULT_DISPLAY_FALLBACK)
-    return round(base * (area / MAX_AREA))
+def calc_display(store, cat, user_overrides=None):
+    """
+    Returns floor display units for (store, category) from real furniture data.
+    user_overrides: dict of {(store, cat): int} for manual adjustments.
+    """
+    if user_overrides and (store, cat) in user_overrides:
+        return user_overrides[(store, cat)]
+    return FURNITURE_DISPLAY.get(store, {}).get(cat, FURNITURE_DISPLAY_FALLBACK)
 
 # ── Load data ─────────────────────────────────────────────────────────────────
 with st.spinner("Loading data…"):
@@ -347,29 +368,40 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**🪟 Display Stock**")
     st.caption(
-        "Units permanently on the shop floor that cannot be sold from the back. "
-        "Deducting these reveals the true available buffer stock."
+        "Units permanently on the shop floor (from real furniture counts). "
+        "Deducting these shows the true free buffer stock."
     )
     show_display = st.toggle("Enable display stock deduction", value=True)
 
-    display_base = {}
+    user_overrides = {}
     if show_display:
-        with st.expander("Base display units (at largest store — 2800 sq ft)", expanded=False):
-            st.caption("Smaller stores are scaled down automatically by floor area.")
-            visible_cats = sorted([c for c in prod_brand["Category"].unique()
-                                   if c and c not in ("nan","")])
-            for cat in visible_cats:
-                display_base[cat] = st.number_input(
-                    cat,
-                    min_value=0, max_value=200,
-                    value=DEFAULT_DISPLAY_BASE.get(cat, DEFAULT_DISPLAY_FALLBACK),
-                    step=1, key=f"disp_{cat}",
-                )
+        with st.expander("📋 View furniture display capacity", expanded=False):
+            st.caption("Calculated from Salt_furniture.xlsx — floor display furniture only.")
+            if sel_loc != "All":
+                store_show = [sel_loc]
+            else:
+                store_show = [s for s in ["Lazimpat","Kumaripati","Baneshwor","Chitwan","Pokhara"]
+                              if s in FURNITURE_DISPLAY]
+            for s in store_show:
+                st.markdown(f"**{s}**")
+                fd = FURNITURE_DISPLAY.get(s, {})
+                for cat in sorted(fd.keys()):
+                    if fd[cat] > 0:
+                        st.caption(f"  {cat}: {fd[cat]} units")
 
-        st.markdown("**Store areas (sq ft)**")
-        for store, area in STORE_AREA.items():
-            if area > 0:
-                st.caption(f"{store}: {area:,} sq ft")
+        with st.expander("✏️ Override a value (optional)", expanded=False):
+            st.caption("Use this to correct a specific store/category if the furniture data is outdated.")
+            ov_store = st.selectbox("Store", list(FURNITURE_DISPLAY.keys()), key="ov_store")
+            ov_cats  = sorted(FURNITURE_DISPLAY.get(ov_store, {}).keys())
+            if ov_cats:
+                ov_cat   = st.selectbox("Category", ov_cats, key="ov_cat")
+                current  = FURNITURE_DISPLAY.get(ov_store, {}).get(ov_cat, 0)
+                ov_val   = st.number_input(
+                    f"Display units (current: {current})",
+                    min_value=0, max_value=2000, value=current, step=1, key="ov_val"
+                )
+                if ov_val != current:
+                    user_overrides[(ov_store, ov_cat)] = ov_val
 
     st.markdown("---")
     st.success("✅ Real stock" if USING_REAL_STOCK else "⚠️ Estimated stock")
@@ -471,7 +503,7 @@ for _, loc_row in pos_agg.iterrows():
         reorder_qty  = max(0, round(target_stock - est_stock))
 
         # Display stock
-        display_units = calc_display(loc, cat, display_base) if show_display else 0
+        display_units = calc_display(loc, cat, user_overrides) if show_display else 0
         free_stock     = max(0, est_stock - display_units)
         weeks_cover_adj = (free_stock / daily_rate / 7) if daily_rate > 0 else 999
         reorder_qty_adj = max(0, round(target_stock - free_stock))
@@ -625,35 +657,34 @@ st.markdown("<br>", unsafe_allow_html=True)
 if show_display:
     with st.expander("ℹ️ How display stock works", expanded=False):
         st.markdown("""
-**Display stock** is the minimum number of units that must always stay on the shop floor
-to keep shelves looking full. These units are *not* available to replenish from the back room.
+**Display stock** is the number of units permanently on the shop floor as display pieces.
+They cannot be pulled to replenish — they must stay on the floor to keep shelves looking full.
 
 | Term | Meaning |
 |------|---------|
-| **Est. Stock** | Total on-hand (from Odoo / warehouse) |
-| **Display Stock** | Units locked on the floor (area-based formula) |
-| **Free Stock** | Est. Stock − Display Stock → the true buffer |
-| **Reorder Qty (Adj)** | How many units to order based on free stock |
+| **Est. Stock** | Total on-hand quantity from Odoo warehouse |
+| **Display Stock** | Units locked on the floor (from real furniture counts) |
+| **Free Stock** | Est. Stock − Display Stock → the true available buffer |
+| **Order Qty** | Units needed to bring Free Stock up to the target buffer |
 
-The formula scales display units by store size:
+Display figures are calculated from **Salt_furniture.xlsx** — each store's actual
+furniture pieces × their capacity, for floor display furniture only.
+Backstore racks and rails are excluded (those are already counted as buffer stock).
 
-> *Display Stock = Base Units × (Store Area ÷ 2,800 sq ft)*
-
-So Chitwan (500 sq ft) shows ~18% of what Baneshwor (2,800 sq ft) needs on display.
+> *Source: Long Rails, T-Hangers, Tables, Square Rails — all floor display furniture.*
 """)
-        # Store display requirements table
-        st.markdown("**Current display stock per store for selected categories:**")
-        if parent_cats:
-            rows_ex = []
-            for store, area in STORE_AREA.items():
-                if area == 0: continue
-                for cat in (parent_cats[:6] if sel_cat == "All" else [sel_cat]):
-                    base = display_base.get(cat, DEFAULT_DISPLAY_FALLBACK)
-                    disp = round(base * (area / MAX_AREA))
-                    rows_ex.append({"Store": store, "Area (sq ft)": area,
-                                    "Category": cat, "Display Units": disp})
-            if rows_ex:
-                st.dataframe(pd.DataFrame(rows_ex), use_container_width=True, hide_index=True)
+        # Show display capacity table for current filter
+        import pandas as _pd
+        rows_ex = []
+        for s in ["Lazimpat","Kumaripati","Baneshwor","Chitwan","Pokhara"]:
+            fd = FURNITURE_DISPLAY.get(s, {})
+            show_cats = [sel_cat] if sel_cat != "All" else sorted(fd.keys())
+            for cat in show_cats:
+                disp = fd.get(cat, 0)
+                rows_ex.append({"Store": s, "Category": cat, "Display Units": disp,
+                                 "Source": "Furniture data"})
+        if rows_ex:
+            st.dataframe(_pd.DataFrame(rows_ex), use_container_width=True, hide_index=True)
 
 st.markdown("---")
 
