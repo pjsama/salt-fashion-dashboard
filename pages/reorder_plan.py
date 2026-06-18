@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 from io import BytesIO
 from pathlib import Path
-from datetime import datetime, timedelta
 
 st.set_page_config(
     page_title="Salt Fashion — Reorder Plan",
@@ -12,16 +11,59 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-.block-container{padding:1.5rem 2rem}
-.reorder-card{background:#ffffff;border-radius:10px;border:1px solid #e2e8f0;padding:16px 18px;margin-bottom:8px}
-.urgent{border-left:4px solid #dc2626}
-.warning{border-left:4px solid #f59e0b}
-.ok{border-left:4px solid #16a34a}
-.kpi-box{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:14px 16px;text-align:center}
-.kpi-val{font-size:26px;font-weight:700;margin:0}
-.kpi-lbl{font-size:11px;color:#6b7280;margin:4px 0 0}
-.src-badge{display:inline-block;padding:1px 8px;border-radius:8px;font-size:10px;
-           font-weight:600;margin-left:6px}
+.block-container { padding: 1.5rem 2rem }
+
+/* Cards */
+.card {
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 18px 20px;
+    margin-bottom: 10px;
+}
+.card-urgent  { border-left: 5px solid #dc2626 }
+.card-warning { border-left: 5px solid #f59e0b }
+.card-ok      { border-left: 5px solid #16a34a }
+
+/* KPI boxes */
+.kpi {
+    background: #fff;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 16px 12px;
+    text-align: center;
+}
+.kpi-adj { border-color: #7c3aed; border-width: 2px }
+.kpi-val { font-size: 28px; font-weight: 700; margin: 0; line-height: 1.2 }
+.kpi-lbl { font-size: 11px; color: #6b7280; margin: 5px 0 0 }
+
+/* Section divider */
+.section-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: #64748b;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    margin: 20px 0 8px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid #e2e8f0;
+}
+
+/* Inline badges */
+.badge {
+    display: inline-block;
+    padding: 2px 9px;
+    border-radius: 9px;
+    font-size: 10px;
+    font-weight: 600;
+    margin-left: 6px;
+    vertical-align: middle;
+}
+.badge-real    { background: #dcfce7; color: #166534 }
+.badge-est     { background: #fef3c7; color: #92400e }
+.badge-display { background: #ede9fe; color: #5b21b6 }
+.badge-free    { background: #ecfeff; color: #155e75 }
+.badge-offseason { background: #f1f5f9; color: #475569 }
 </style>
 """, unsafe_allow_html=True)
 
@@ -31,104 +73,82 @@ GDRIVE_POS_ID       = "1YcW30p_dUfeeaQj-XXmGhMHP0ldAM32X"
 GDRIVE_LOCSTK_ID    = "1zgTBhh7vOTjxEIz-LO3YSM-TXJeDUrBT"
 GDRIVE_RECENTCAT_ID = "1EMEw10v7zEwsMzrocJWCjkyRfy14LaIM"
 
-# ── Planning constants ────────────────────────────────────────────────────────
-MIN_REORDER_QTY = 5   # suppress "Reorder Soon" when the gap is trivially small
+# ── Constants ─────────────────────────────────────────────────────────────────
+MIN_REORDER_QTY = 5
 
-# ── Display stock configuration ───────────────────────────────────────────────
-# Store floor areas in sq ft — used to scale display stock proportionally.
-# Bigger store = more floor displays = more stock tied up on the floor.
 STORE_AREA = {
     "Baneshwor":  2800,
     "Pokhara":    2800,
     "Kumaripati": 2200,
     "Lazimpat":   2000,
     "Chitwan":     500,
-    "Online":        0,   # no physical display
-    "Baneshwor Lush":  0,
-    "Chitwan Lush":    0,
-    "Pokhara Lush":    0,
+    "Online":        0,
+    "Baneshwor Lush": 0,
+    "Chitwan Lush":   0,
+    "Pokhara Lush":   0,
 }
-MAX_AREA = max(v for v in STORE_AREA.values() if v > 0)  # 2800
+MAX_AREA = max(v for v in STORE_AREA.values() if v > 0)
 
-# Base display units per category at the largest store (2800 sq ft).
-# Smaller stores get a proportionally smaller display requirement.
-# These are editable in the sidebar — these are just sensible starting defaults.
 DEFAULT_DISPLAY_BASE = {
-    "Tops":         30,
-    "Dress":        25,
-    "Denim Pant":   20,
-    "Shorts":       20,
-    "Skirt":        20,
-    "Skort":        15,
-    "Basic Top":    20,
-    "Co-Ord Set":   15,
-    "Jacket":       15,
-    "Coat":         12,
-    "Sweater":      12,
-    "Cardigan":     12,
-    "Sweatshirt":   10,
-    "Hoodie":       10,
-    "Leggings":     15,
-    "Jeans":        20,
-    "T-Shirts":     20,
-    "Fashion Accessories": 10,
+    "Tops": 30, "Dress": 25, "Denim Pant": 20, "Shorts": 20,
+    "Skirt": 20, "Skort": 15, "Basic Top": 20, "Co-Ord Set": 15,
+    "Jacket": 15, "Coat": 12, "Sweater": 12, "Cardigan": 12,
+    "Sweatshirt": 10, "Hoodie": 10, "Leggings": 15,
+    "Jeans": 20, "T-Shirts": 20, "Fashion Accessories": 10,
 }
-DEFAULT_DISPLAY_FALLBACK = 10  # for categories not listed above
+DEFAULT_DISPLAY_FALLBACK = 10
 
-LOCATION_ORDER = ["Baneshwor","Lazimpat","Kumaripati","Chitwan","Pokhara","Online",
-                  "Baneshwor Lush","Chitwan Lush","Pokhara Lush"]
+LOCATION_ORDER = [
+    "Baneshwor", "Lazimpat", "Kumaripati", "Chitwan", "Pokhara",
+    "Online", "Baneshwor Lush", "Chitwan Lush", "Pokhara Lush",
+]
 
 STORE_NAME_FIX = {
-    "lazimpat":       "Lazimpat",
-    "baneshwor":      "Baneshwor",
-    "chitwan":        "Chitwan",
-    "kumaripati":     "Kumaripati",
-    "pokhara":        "Pokhara",
-    "online":         "Online",
+    "lazimpat": "Lazimpat", "baneshwor": "Baneshwor",
+    "chitwan": "Chitwan", "kumaripati": "Kumaripati",
+    "pokhara": "Pokhara", "online": "Online",
     "main warehouse": "Main Warehouse",
 }
 
-SKIP_PARTS = {"All","Saleable","PoS",""}
+SKIP_PARTS = {"All", "Saleable", "PoS", ""}
+
+WINTER_CATS = {"Coat","Jacket","Sweater","Cardigan","Sweatshirt","Hoodie",
+               "Waistcoat","Pajamas Set","Vest","Knitted","Fur Regular","Wool"}
+SUMMER_CATS = {"T-Shirts","Shorts","Tops","Dress","Co-Ord Set","Tank Top",
+               "Swim Wear","Skirt","Skort","Sundress","Basic Top"}
+
 
 def split_cat(raw):
-    """Returns (category, sub_category) from Odoo path like 'Jacket / Fur Regular'."""
     parts = [p.strip() for p in str(raw).split("/") if p.strip() not in SKIP_PARTS]
-    if not parts:
-        return "", ""
-    if len(parts) == 1:
-        return parts[0], ""
-    # parts[0] = parent category, parts[1] = sub-category
+    if not parts: return "", ""
+    if len(parts) == 1: return parts[0], ""
     return parts[0], parts[1]
 
 def norm_store(name):
     return STORE_NAME_FIX.get(str(name).strip().lower(), str(name).strip())
 
-# ── Seasonal category classification ──────────────────────────────────────────
-WINTER_CATEGORIES = {
-    "Coat","Jacket","Sweater","Cardigan","Sweatshirt","Hoodie","Waistcoat",
-    "Pajamas Set","Vest","Knitted","Fur Regular","Wool",
-}
-SUMMER_CATEGORIES = {
-    "T-Shirts","Shorts","Tops","Dress","Co-Ord Set","Tank Top","Swim Wear",
-    "Skirt","Skort","Sundress","Basic Top",
-}
-
-def season_for_month(month):
-    if month in (11,12,1,2): return "Winter"
-    if month in (5,6,7,8,9):  return "Summer"
-    return "Transition"
-
-CURRENT_SEASON = season_for_month(pd.Timestamp.today().month)
-
-def category_season(cat):
-    if cat in WINTER_CATEGORIES: return "Winter"
-    if cat in SUMMER_CATEGORIES: return "Summer"
+def cat_season(cat):
+    if cat in WINTER_CATS: return "Winter"
+    if cat in SUMMER_CATS: return "Summer"
     return "All-Season"
 
-# ── Loaders ───────────────────────────────────────────────────────────────────
+def current_season():
+    m = pd.Timestamp.today().month
+    if m in (11,12,1,2): return "Winter"
+    if m in (5,6,7,8,9): return "Summer"
+    return "Transition"
+
+CURRENT_SEASON = current_season()
+
+def fmt_npr(v):
+    if pd.isna(v) or v == 0: return "—"
+    if v >= 1_000_000: return f"NPR {v/1_000_000:.1f}M"
+    if v >= 1_000:     return f"NPR {v/1_000:.0f}K"
+    return f"NPR {v:,.0f}"
+
+# ── Google Drive loader ───────────────────────────────────────────────────────
 def gdrive_bytes(file_id):
-    if not file_id:
-        return None, None
+    if not file_id: return None, None
     try:
         from google.oauth2.service_account import Credentials
         import googleapiclient.discovery
@@ -144,43 +164,40 @@ def gdrive_bytes(file_id):
         dl   = MediaIoBaseDownload(buf, req)
         done = False
         while not done: _, done = dl.next_chunk()
-        buf.seek(0); return buf, None
+        buf.seek(0)
+        return buf, None
     except Exception as e:
         return None, str(e)
 
+# ── Data loaders ──────────────────────────────────────────────────────────────
 @st.cache_data(ttl=600, show_spinner=False)
 def load_products():
     buf, _ = gdrive_bytes(GDRIVE_MAIN_ID)
+    df = None
     if buf:
         try: df = pd.read_excel(buf, sheet_name="Products", engine="openpyxl")
-        except: df = None
-    else: df = None
+        except: pass
     if df is None:
         base = r"C:\Users\Legion\Desktop\odoo_export"
-        for d in [base+r"\exports", base]:
-            files = sorted(Path(d).glob("odoo_products*.xlsx"),reverse=True) if Path(d).exists() else []
-            if files: df = pd.read_excel(files[0], sheet_name="Products", engine="openpyxl"); break
+        for d in [base + r"\exports", base]:
+            files = sorted(Path(d).glob("odoo_products*.xlsx"), reverse=True) if Path(d).exists() else []
+            if files:
+                df = pd.read_excel(files[0], sheet_name="Products", engine="openpyxl")
+                break
     if df is None: return None
     df.columns = [c.strip() for c in df.columns]
-    for col in ["Sales Price","On Hand Qty","Total Units Sold"]:
+    for col in ["Sales Price", "On Hand Qty", "Total Units Sold"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-
-    # ── Split Category into parent + sub ──────────────────────────────────────
-    # The export may already have a "Sub Category" column (from odoo_export_products.py)
-    # OR Category may still contain slashes. Handle both cases.
     if "Category" in df.columns:
-        has_sub_col = "Sub Category" in df.columns
-        has_slashes = df["Category"].str.contains("/", na=False).any()
-
-        if not has_sub_col or has_slashes:
+        has_sub   = "Sub Category" in df.columns
+        has_slash = df["Category"].str.contains("/", na=False).any()
+        if not has_sub or has_slash:
             split = df["Category"].apply(split_cat)
             df["Category"]     = split.apply(lambda x: x[0])
             df["Sub Category"] = split.apply(lambda x: x[1])
-        # If Sub Category already exists and no slashes, leave both columns as-is
         if "Sub Category" not in df.columns:
             df["Sub Category"] = ""
-
     for col in ["Brand","Category","Sub Category","Product Name"]:
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
@@ -194,8 +211,10 @@ def load_pos():
         try: df = pd.read_excel(buf, sheet_name="Point of Sale Analysis", engine="openpyxl")
         except: pass
     if df is None:
-        files = sorted(Path(r"C:\Users\Legion\Desktop\odoo_export\exports").glob("pos_analysis_*.xlsx"),reverse=True) \
-                if Path(r"C:\Users\Legion\Desktop\odoo_export\exports").exists() else []
+        files = sorted(
+            Path(r"C:\Users\Legion\Desktop\odoo_export\exports").glob("pos_analysis_*.xlsx"),
+            reverse=True
+        ) if Path(r"C:\Users\Legion\Desktop\odoo_export\exports").exists() else []
         if files: df = pd.read_excel(files[0], sheet_name="Point of Sale Analysis", engine="openpyxl")
     if df is None: return None
     df.columns = [c.strip() for c in df.columns]
@@ -214,81 +233,77 @@ def load_location_stock():
     df = None
     if buf:
         try: df = pd.read_excel(buf, sheet_name="Store x Category", engine="openpyxl")
-        except Exception as e: err = f"Drive file found but sheet read failed: {e}"
+        except Exception as e: err = str(e)
     if df is None:
-        base = r"C:\Users\Legion\Desktop\odoo_export\exports"
-        files = sorted(Path(base).glob("location_stock_*.xlsx"), reverse=True) if Path(base).exists() else []
+        files = sorted(
+            Path(r"C:\Users\Legion\Desktop\odoo_export\exports").glob("location_stock_*.xlsx"),
+            reverse=True
+        ) if Path(r"C:\Users\Legion\Desktop\odoo_export\exports").exists() else []
         if files:
             try:
                 df = pd.read_excel(files[0], sheet_name="Store x Category", engine="openpyxl")
                 err = None
-            except Exception as e:
-                err = f"Local file found but sheet read failed: {e}"
+            except Exception as e: err = str(e)
     if df is None or df.empty:
         return None, set(), err
-
     df.columns = [str(c).strip() for c in df.columns]
-    cat_col = df.columns[0]
+    cat_col    = df.columns[0]
     store_cols = [c for c in df.columns if c != cat_col]
-
-    long_rows = []
+    long_rows      = []
     covered_stores = set()
     for _, row in df.iterrows():
         cat = str(row[cat_col]).strip()
-        if not cat or cat.lower() in ("nan",""):
-            continue
+        if not cat or cat.lower() in ("nan", ""): continue
         for store in store_cols:
             covered_stores.add(norm_store(store))
             qty = row[store]
             qty_val = 0.0 if pd.isna(qty) else float(qty)
             long_rows.append({
-                "Location": norm_store(store),
-                "Category": cat,
+                "Location":    norm_store(store),
+                "Category":    cat,
                 "On_Hand_Real": max(0.0, qty_val),
             })
-    if not long_rows:
-        return None, set(), err
+    if not long_rows: return None, set(), err
     return pd.DataFrame(long_rows), covered_stores, None
 
 @st.cache_data(ttl=600, show_spinner=False)
-def load_recent_category_sales():
+def load_recent_cat_sales():
     buf, err = gdrive_bytes(GDRIVE_RECENTCAT_ID)
     df = None
     if buf:
         try: df = pd.read_excel(buf, sheet_name="Recent Category Sales", engine="openpyxl")
-        except Exception as e: err = f"Drive file found but sheet read failed: {e}"
+        except Exception as e: err = str(e)
     if df is None:
-        base = r"C:\Users\Legion\Desktop\odoo_export\exports"
-        files = sorted(Path(base).glob("category_sales_recent_*.xlsx"), reverse=True) \
-                if Path(base).exists() else []
+        files = sorted(
+            Path(r"C:\Users\Legion\Desktop\odoo_export\exports").glob("category_sales_recent_*.xlsx"),
+            reverse=True
+        ) if Path(r"C:\Users\Legion\Desktop\odoo_export\exports").exists() else []
         if files:
             try:
                 df = pd.read_excel(files[0], sheet_name="Recent Category Sales", engine="openpyxl")
                 err = None
-            except Exception as e:
-                err = f"Local file found but sheet read failed: {e}"
-    if df is None or df.empty:
-        return None, err
+            except Exception as e: err = str(e)
+    if df is None or df.empty: return None, err
     df.columns = [str(c).strip() for c in df.columns]
     df["Location"] = df["Location"].apply(norm_store)
     return df, None
 
+# ── Display stock calculator ──────────────────────────────────────────────────
+def calc_display(store, cat, display_base):
+    area = STORE_AREA.get(store, 0)
+    if area == 0: return 0
+    base = display_base.get(cat, DEFAULT_DISPLAY_FALLBACK)
+    return round(base * (area / MAX_AREA))
 
-def fmt_npr(v):
-    if pd.isna(v) or v == 0: return "—"
-    if v >= 1_000_000: return f"NPR {v/1_000_000:.1f}M"
-    if v >= 1_000:     return f"NPR {v/1_000:.0f}K"
-    return f"NPR {v:,.0f}"
-
-# ── Main ──────────────────────────────────────────────────────────────────────
+# ── Load data ─────────────────────────────────────────────────────────────────
 with st.spinner("Loading data…"):
-    df_prod   = load_products()
-    df_pos    = load_pos()
-    df_locstk, covered_stores, locstk_err = load_location_stock()
-    df_recent_cat, recentcat_err = load_recent_category_sales()
+    df_prod                       = load_products()
+    df_pos                        = load_pos()
+    df_locstk, covered_stores, _  = load_location_stock()
+    df_recent_cat, _              = load_recent_cat_sales()
 
 if df_prod is None or df_pos is None:
-    st.error("Could not load data. Make sure both product and POS files are on Google Drive.")
+    st.error("Could not load data. Make sure product and POS files are on Google Drive.")
     st.stop()
 
 USING_REAL_STOCK     = df_locstk is not None and not df_locstk.empty
@@ -301,120 +316,69 @@ with st.sidebar:
 
     brands = sorted([b for b in df_prod["Brand"].unique()
                      if b and b not in ("nan","True","False","None","")])
-    sel_brand = st.selectbox("Brand", brands, index=0)
+    sel_brand = st.selectbox("Brand", brands)
 
     st.markdown("---")
     st.markdown("**Planning settings**")
-    target_weeks = st.slider("Target weeks of cover", 2, 12, 4,
-        help="How many weeks of stock you want to always have.")
-    lookback_weeks = st.slider("Sales lookback (weeks)", 2, 12, 4,
-        help="How many recent weeks to use for calculating weekly sell rate.")
-    min_weekly_rate = st.number_input("Min weekly rate to show (units)", 0, 50, 1,
-        help="Hide categories selling fewer than this per week.")
+    target_weeks   = st.slider("Target weeks of cover", 2, 12, 4)
+    lookback_weeks = st.slider("Sales lookback (weeks)", 2, 12, 4)
+    min_weekly_rate = st.number_input("Min weekly rate to show", 0, 50, 1)
 
     st.markdown("---")
     locations = ["All"] + [l for l in LOCATION_ORDER if l in df_pos["Location"].unique()]
-    sel_loc = st.selectbox("Filter by location", locations)
+    sel_loc   = st.selectbox("Location", locations)
 
-    # ── Category filter (parent only) ─────────────────────────────────────────
     prod_brand = df_prod[df_prod["Brand"] == sel_brand]
     parent_cats = sorted([c for c in prod_brand["Category"].unique()
                           if c and c not in ("nan","")])
-    sel_cat = st.selectbox("Filter by category", ["All"] + parent_cats)
+    sel_cat = st.selectbox("Category", ["All"] + parent_cats)
 
-    # ── Sub-category filter (cascades from parent selection) ──────────────────
     sel_sub_cat = "All"
     if sel_cat != "All" and "Sub Category" in prod_brand.columns:
         sub_cats = sorted([s for s in
                            prod_brand[prod_brand["Category"] == sel_cat]["Sub Category"].unique()
-                           if s and s not in ("nan", "")])
+                           if s and s not in ("nan","")])
         if sub_cats:
-            sel_sub_cat = st.selectbox(
-                "Filter by sub-category",
-                ["All"] + sub_cats,
-                help=f"Sub-types within {sel_cat}")
+            sel_sub_cat = st.selectbox("Sub-category", ["All"] + sub_cats)
 
-    season_options = ["All", "Summer", "Winter", "All-Season"]
-    sel_season = st.selectbox("Filter by season", season_options, index=0,
-        help=f"Current season: {CURRENT_SEASON}.")
+    sel_season = st.selectbox("Season", ["All","Summer","Winter","All-Season"])
 
-    # ── Display stock settings ─────────────────────────────────────────────────
+    # ── Display stock ──────────────────────────────────────────────────────────
     st.markdown("---")
-    st.markdown("**🪟 Display Stock Settings**",
-                help="Display stock = units permanently on the shop floor that can't be sold "
-                     "from the back. Deducting this gives the true free/buffer stock.")
-
+    st.markdown("**🪟 Display Stock**")
+    st.caption(
+        "Units permanently on the shop floor that cannot be sold from the back. "
+        "Deducting these reveals the true available buffer stock."
+    )
     show_display = st.toggle("Enable display stock deduction", value=True)
 
     display_base = {}
-    display_overrides = {}   # (store, category) -> override units
-
     if show_display:
-        # Let user edit the base units per category
-        with st.expander("Base display units (at largest store)", expanded=False):
-            st.caption("Units of each category on display at a 2800 sq ft store. "
-                       "Smaller stores are scaled down automatically by floor area.")
-            # Show only categories present in the current brand's data
+        with st.expander("Base display units (at largest store — 2800 sq ft)", expanded=False):
+            st.caption("Smaller stores are scaled down automatically by floor area.")
             visible_cats = sorted([c for c in prod_brand["Category"].unique()
                                    if c and c not in ("nan","")])
             for cat in visible_cats:
-                default_val = DEFAULT_DISPLAY_BASE.get(cat, DEFAULT_DISPLAY_FALLBACK)
                 display_base[cat] = st.number_input(
-                    cat, min_value=0, max_value=200,
-                    value=default_val, step=1, key=f"disp_{cat}")
+                    cat,
+                    min_value=0, max_value=200,
+                    value=DEFAULT_DISPLAY_BASE.get(cat, DEFAULT_DISPLAY_FALLBACK),
+                    step=1, key=f"disp_{cat}",
+                )
 
-        # Per-store overrides
-        with st.expander("Store overrides (optional)", expanded=False):
-            st.caption("Override the area-formula for a specific store + category. "
-                       "Leave 0 to use the formula.")
-            override_store = st.selectbox("Store", [s for s in LOCATION_ORDER
-                                                     if STORE_AREA.get(s,0) > 0],
-                                          key="ovr_store")
-            override_cat   = st.selectbox("Category", ["(none)"] + sorted(display_base.keys()),
-                                          key="ovr_cat")
-            override_units = st.number_input("Override units", min_value=0, max_value=500,
-                                             value=0, step=1, key="ovr_units")
-            if st.button("➕ Add override") and override_cat != "(none)" and override_units > 0:
-                st.session_state[f"override_{override_store}_{override_cat}"] = override_units
-
-            # Show active overrides stored in session state
-            active = {k: v for k, v in st.session_state.items()
-                      if k.startswith("override_") and v > 0}
-            if active:
-                st.markdown("**Active overrides:**")
-                for k, v in active.items():
-                    parts = k.replace("override_","").rsplit("_",1)
-                    st.markdown(f"- {parts[0]} · {parts[1] if len(parts)>1 else ''} = **{v} units**")
-                    display_overrides[tuple(k.replace("override_","").rsplit("_",1))] = v
-                if st.button("🗑 Clear all overrides"):
-                    for k in list(st.session_state.keys()):
-                        if k.startswith("override_"):
-                            del st.session_state[k]
-                    st.rerun()
+        st.markdown("**Store areas (sq ft)**")
+        for store, area in STORE_AREA.items():
+            if area > 0:
+                st.caption(f"{store}: {area:,} sq ft")
 
     st.markdown("---")
-    if USING_REAL_STOCK:
-        st.success("✅ Using real per-location stock")
-    else:
-        msg = "⚠️ Real location stock not found — using estimated split. "
-        if locstk_err:
-            msg += f"Error: {locstk_err}. "
-        msg += "Run `python fetch_location_stock.py` and set GDRIVE_LOCSTK_ID."
-        st.warning(msg)
-
-    if USING_SEASONAL_RATES:
-        st.success("✅ Using current-season sell rates")
-    else:
-        msg = "⚠️ Seasonal sales data not found — winter items may show as 'urgent'. "
-        if recentcat_err:
-            msg += f"Error: {recentcat_err}. "
-        msg += "Run `python fetch_recent_category_sales.py --brand SALT` and set GDRIVE_RECENTCAT_ID."
-        st.warning(msg)
+    st.success("✅ Real stock" if USING_REAL_STOCK else "⚠️ Estimated stock")
+    st.success("✅ Seasonal rates" if USING_SEASONAL_RATES else "⚠️ All-time rates")
 
     if st.button("🔄 Refresh", use_container_width=True):
         st.cache_data.clear(); st.rerun()
 
-# ── Calculate weekly sell rates from POS data ─────────────────────────────────
+# ── Build weekly rates from POS ───────────────────────────────────────────────
 today          = pd.Timestamp.today().normalize()
 lookback_start = today - pd.Timedelta(weeks=lookback_weeks)
 pos_recent     = df_pos[df_pos["Date"] >= lookback_start].copy()
@@ -429,97 +393,57 @@ rev_col = "Sales Amount" if "Sales Amount" in pos_recent.columns else "Revenue"
 pos_agg = pos_recent.groupby("Location").agg(
     Total_Units=(qty_col, "sum"),
     Total_Revenue=(rev_col, "sum"),
-    Days=("Date", "nunique"),
 ).reset_index()
 pos_agg["Weekly_Rate"]    = pos_agg["Total_Units"] / lookback_weeks
-pos_agg["Daily_Rate"]     = pos_agg["Total_Units"] / (lookback_weeks * 7)
 pos_agg["Weekly_Revenue"] = pos_agg["Total_Revenue"] / lookback_weeks
 
-# ── Stock per (Category, Sub Category) from product data ─────────────────────
-prod_brand = df_prod[df_prod["Brand"] == sel_brand].copy()
+total_units_all = pos_agg["Total_Units"].sum()
+pos_agg["Share"] = pos_agg["Total_Units"] / total_units_all if total_units_all > 0 else 0
 
-# Aggregate at (Category, Sub Category) level so sub-category is preserved
+# ── Stock per category ────────────────────────────────────────────────────────
+prod_brand = df_prod[df_prod["Brand"] == sel_brand].copy()
 group_cols = ["Category", "Sub Category"] if "Sub Category" in prod_brand.columns else ["Category"]
 
 cat_stock = prod_brand.groupby(group_cols).agg(
-    On_Hand=("On Hand Qty","sum"),
-    Products=("Product Name","nunique"),
-    Avg_Price=("Sales Price","mean"),
+    On_Hand=("On Hand Qty", "sum"),
+    Total_Sold=("Total Units Sold", "sum"),
+    Avg_Price=("Sales Price", "mean"),
 ).reset_index()
 
-# Avg price lookup keyed by (Category, Sub Category)
-avg_price_map = {
-    (row["Category"], row.get("Sub Category","")): row["Avg_Price"]
-    for _, row in cat_stock.iterrows()
-}
+total_sold_all = cat_stock["Total_Sold"].sum()
 
-# ── Display stock calculator ──────────────────────────────────────────────────
-def calc_display_stock(store, cat, display_base, display_overrides, show_display):
-    """
-    Returns how many units of `cat` are permanently on display at `store`.
-    Priority: override > area-formula > 0 (if disabled).
-    """
-    if not show_display:
-        return 0
-    # Check override (stored as session state key override_{store}_{cat})
-    ovr_key = (store, cat)
-    if ovr_key in display_overrides:
-        return display_overrides[ovr_key]
-    # Area-based formula
-    area      = STORE_AREA.get(store, 0)
-    if area == 0:
-        return 0
-    base      = display_base.get(cat, DEFAULT_DISPLAY_FALLBACK)
-    area_frac = area / MAX_AREA          # e.g. Chitwan: 500/2800 = 0.179
-    return round(base * area_frac)
-
-# ── Build reorder plan ────────────────────────────────────────────────────────
-total_units = pos_agg["Total_Units"].sum()
-pos_agg["Location_Share"] = pos_agg["Total_Units"] / total_units if total_units > 0 else 0
-
-cat_sold = prod_brand.groupby(group_cols)["Total Units Sold"].sum().reset_index()
-cat_sold.columns = group_cols + ["Total_Sold"]
-cat_data = cat_stock.merge(cat_sold, on=group_cols, how="left").fillna(0)
-total_sold_all = cat_data["Total_Sold"].sum()
-
-# Real stock lookup: (location, category) -> on-hand
-# Note: location_stock only has parent category, so we look up by parent cat
 real_stock_map = {}
 if USING_REAL_STOCK:
     for _, r in df_locstk.iterrows():
         real_stock_map[(r["Location"], r["Category"])] = r["On_Hand_Real"]
 
-# Recent seasonal rate lookup: (location, category) -> weekly rate
 recent_rate_map = {}
 if USING_SEASONAL_RATES:
     for _, r in df_recent_cat.iterrows():
         recent_rate_map[(r["Location"], r["Category"])] = float(r.get("Weekly Rate", 0) or 0)
 
+# ── Build plan rows ───────────────────────────────────────────────────────────
 rows = []
 for _, loc_row in pos_agg.iterrows():
-    loc             = loc_row["Location"]
-    share           = loc_row["Location_Share"]
-    loc_weekly_rate = loc_row["Weekly_Rate"]
-    loc_weekly_rev  = loc_row["Weekly_Revenue"]
+    loc   = loc_row["Location"]
+    share = loc_row["Share"]
+    loc_wr = loc_row["Weekly_Rate"]
 
-    for _, cat_row in cat_data.iterrows():
+    for _, cat_row in cat_stock.iterrows():
         cat     = cat_row["Category"]
         sub_cat = cat_row.get("Sub Category", "") if "Sub Category" in cat_row.index else ""
         if not cat or cat in ("nan","","All"): continue
 
-        # ── Stock: real per parent-category if available, else proportional ──
+        # Stock
         real_val = real_stock_map.get((loc, cat))
         if real_val is not None:
-            # When there are multiple sub-cats under one parent, split the
-            # parent-level real stock proportionally by their historical sales.
-            # This is the best we can do — location_stock tracks at category level.
-            sub_sold_total = cat_data[cat_data["Category"] == cat]["Total_Sold"].sum()
+            sub_sold_total = cat_stock[cat_stock["Category"] == cat]["Total_Sold"].sum()
             if sub_sold_total > 0:
-                sub_fraction = cat_row["Total_Sold"] / sub_sold_total
+                sub_frac = cat_row["Total_Sold"] / sub_sold_total
             else:
-                sub_count    = len(cat_data[cat_data["Category"] == cat])
-                sub_fraction = 1.0 / sub_count if sub_count > 0 else 1.0
-            est_stock    = max(0, real_val * sub_fraction)
+                sub_count = len(cat_stock[cat_stock["Category"] == cat])
+                sub_frac  = 1.0 / sub_count if sub_count > 0 else 1.0
+            est_stock    = max(0, real_val * sub_frac)
             stock_source = "real"
         elif loc in covered_stores:
             est_stock    = 0
@@ -528,338 +452,383 @@ for _, loc_row in pos_agg.iterrows():
             est_stock    = cat_row["On_Hand"] * share
             stock_source = "est"
 
-        # ── Weekly rate: seasonal if available, else all-time share ──────────
-        cat_share_of_total = cat_row["Total_Sold"] / total_sold_all if total_sold_all > 0 else 0
+        # Rate
+        cat_share = cat_row["Total_Sold"] / total_sold_all if total_sold_all > 0 else 0
         if (loc, cat) in recent_rate_map:
-            # Seasonal rate is also at parent-category level — split same way
-            sub_sold_total = cat_data[cat_data["Category"] == cat]["Total_Sold"].sum()
-            sub_fraction_rate = (cat_row["Total_Sold"] / sub_sold_total
-                                 if sub_sold_total > 0 else
-                                 1.0 / max(1, len(cat_data[cat_data["Category"] == cat])))
-            weekly_rate = recent_rate_map[(loc, cat)] * sub_fraction_rate
-            rate_source = "seasonal"
+            sub_sold_total = cat_stock[cat_stock["Category"] == cat]["Total_Sold"].sum()
+            sub_frac_r = (cat_row["Total_Sold"] / sub_sold_total
+                         if sub_sold_total > 0
+                         else 1.0 / max(1, len(cat_stock[cat_stock["Category"] == cat])))
+            weekly_rate = recent_rate_map[(loc, cat)] * sub_frac_r
         else:
-            weekly_rate = loc_weekly_rate * cat_share_of_total
-            rate_source = "alltime"
+            weekly_rate = loc_wr * cat_share
 
         if weekly_rate < min_weekly_rate: continue
 
         daily_rate   = weekly_rate / 7
-        days_cover   = est_stock / daily_rate if daily_rate > 0 else 999
-        weeks_cover  = days_cover / 7
+        weeks_cover  = (est_stock / daily_rate / 7) if daily_rate > 0 else 999
         target_stock = target_weeks * weekly_rate
         reorder_qty  = max(0, round(target_stock - est_stock))
 
-        # ── Display stock deduction ───────────────────────────────────────────
-        display_units  = calc_display_stock(loc, cat, display_base, display_overrides, show_display)
-        free_stock     = max(0, est_stock - display_units)   # stock not locked on floor
-
-        # Adjusted metrics using free stock instead of total stock
-        days_cover_adj  = free_stock / daily_rate if daily_rate > 0 else 999
-        weeks_cover_adj = days_cover_adj / 7
+        # Display stock
+        display_units = calc_display(loc, cat, display_base) if show_display else 0
+        free_stock     = max(0, est_stock - display_units)
+        weeks_cover_adj = (free_stock / daily_rate / 7) if daily_rate > 0 else 999
         reorder_qty_adj = max(0, round(target_stock - free_stock))
 
-        # ── Urgency (based on raw stock — shown alongside adjusted) ──────────
+        # Urgency (raw)
         if weeks_cover <= 1:
-            urgency     = "🔴 Urgent"
-            urgency_key = 0
+            urgency, uk = "🔴 Urgent", 0
         elif weeks_cover < target_weeks and reorder_qty >= MIN_REORDER_QTY:
-            urgency     = "🟡 Reorder Soon"
-            urgency_key = 1
+            urgency, uk = "🟡 Reorder Soon", 1
         else:
-            urgency     = "🟢 OK"
-            urgency_key = 2
+            urgency, uk = "🟢 OK", 2
 
-        # Adjusted urgency (using free stock)
+        # Urgency (adjusted)
         if weeks_cover_adj <= 1:
-            urgency_adj     = "🔴 Urgent"
-            urgency_key_adj = 0
+            urgency_adj, uk_adj = "🔴 Urgent", 0
         elif weeks_cover_adj < target_weeks and reorder_qty_adj >= MIN_REORDER_QTY:
-            urgency_adj     = "🟡 Reorder Soon"
-            urgency_key_adj = 1
+            urgency_adj, uk_adj = "🟡 Reorder Soon", 1
         else:
-            urgency_adj     = "🟢 OK"
-            urgency_key_adj = 2
-
-        avg_price = avg_price_map.get((cat, sub_cat), 0)
+            urgency_adj, uk_adj = "🟢 OK", 2
 
         rows.append({
-            "Location":          loc,
-            "Category":          cat,
-            "Sub Category":      sub_cat,
-            "Season":            category_season(cat),
-            # Raw (no display deduction)
-            "Est. Stock":        round(est_stock),
-            "Stock Source":      stock_source,
-            "Rate Source":       rate_source,
-            "Weekly Rate":       round(weekly_rate, 1),
-            "Weeks Cover":       round(weeks_cover, 1),
-            "Target Stock":      round(target_stock),
-            "Reorder Qty":       reorder_qty,
-            "Est. Value":        round(reorder_qty * avg_price),
-            "Urgency":           urgency,
-            "_urgency_key":      urgency_key,
-            # Adjusted (display stock deducted)
-            "Display Stock":     display_units,
-            "Free Stock":        round(free_stock),
-            "Weeks Cover (Adj)": round(weeks_cover_adj, 1),
-            "Reorder Qty (Adj)": reorder_qty_adj,
-            "Est. Value (Adj)":  round(reorder_qty_adj * avg_price),
-            "Urgency (Adj)":     urgency_adj,
-            "_urgency_key_adj":  urgency_key_adj,
-            "_weekly_rev":       loc_weekly_rev * cat_share_of_total if rate_source == "alltime" else 0,
+            "Location":           loc,
+            "Category":           cat,
+            "Sub Category":       sub_cat,
+            "Season":             cat_season(cat),
+            # Raw
+            "Est. Stock":         round(est_stock),
+            "Stock Source":       stock_source,
+            "Weekly Rate":        round(weekly_rate, 1),
+            "Weeks Cover":        round(weeks_cover, 1),
+            "Target Stock":       round(target_stock),
+            "Reorder Qty":        reorder_qty,
+            "Est. Value":         round(reorder_qty * cat_row["Avg_Price"]),
+            "Urgency":            urgency,
+            "_uk":                uk,
+            # Adjusted
+            "Display Stock":      display_units,
+            "Free Stock":         round(free_stock),
+            "Weeks Cover (Adj)":  round(weeks_cover_adj, 1),
+            "Reorder Qty (Adj)":  reorder_qty_adj,
+            "Est. Value (Adj)":   round(reorder_qty_adj * cat_row["Avg_Price"]),
+            "Urgency (Adj)":      urgency_adj,
+            "_uk_adj":            uk_adj,
         })
 
 df_plan = pd.DataFrame(rows)
 
 if df_plan.empty:
-    st.warning("No reorder data — check that POS and product data are loaded correctly.")
+    st.warning("No reorder data. Check that POS and product data are loaded correctly.")
     st.stop()
 
-# ── Apply filters ─────────────────────────────────────────────────────────────
-if sel_loc != "All":
-    df_plan = df_plan[df_plan["Location"] == sel_loc]
-if sel_cat != "All":
-    df_plan = df_plan[df_plan["Category"] == sel_cat]
-if sel_sub_cat != "All":
-    df_plan = df_plan[df_plan["Sub Category"] == sel_sub_cat]
-if sel_season != "All":
-    df_plan = df_plan[df_plan["Season"] == sel_season]
+# Filters
+if sel_loc     != "All": df_plan = df_plan[df_plan["Location"]     == sel_loc]
+if sel_cat     != "All": df_plan = df_plan[df_plan["Category"]     == sel_cat]
+if sel_sub_cat != "All": df_plan = df_plan[df_plan["Sub Category"] == sel_sub_cat]
+if sel_season  != "All": df_plan = df_plan[df_plan["Season"]       == sel_season]
 
-df_plan = df_plan.sort_values(["_urgency_key","Reorder Qty"], ascending=[True,False])
+# Sort by adjusted urgency when display is on, raw urgency otherwise
+sort_key = "_uk_adj" if show_display else "_uk"
+df_plan  = df_plan.sort_values([sort_key, "Reorder Qty (Adj)" if show_display else "Reorder Qty"],
+                                ascending=[True, False])
 
-# ── Header ────────────────────────────────────────────────────────────────────
+# ── Page header ───────────────────────────────────────────────────────────────
 st.title("📦 Reorder Planner")
-src_badge = ('<span class="src-badge" style="background:#dcfce7;color:#166534">Real stock</span>'
-              if USING_REAL_STOCK else
-              '<span class="src-badge" style="background:#fef3c7;color:#92400e">Estimated stock</span>')
-filter_desc = sel_cat if sel_cat != "All" else "All Categories"
-if sel_sub_cat != "All":
-    filter_desc += f" › {sel_sub_cat}"
+stock_badge = (
+    '<span class="badge badge-real">✅ Real stock</span>'
+    if USING_REAL_STOCK else
+    '<span class="badge badge-est">≈ Estimated stock</span>'
+)
+filter_label = sel_cat if sel_cat != "All" else "All Categories"
+if sel_sub_cat != "All": filter_label += f" › {sel_sub_cat}"
+
 st.markdown(
-    f"{sel_brand} · {filter_desc} · {target_weeks}-week target · "
-    f"Last {lookback_weeks} weeks · {today.strftime('%B %d, %Y')} {src_badge}",
-    unsafe_allow_html=True)
+    f"{sel_brand} &nbsp;·&nbsp; {filter_label} &nbsp;·&nbsp; "
+    f"{target_weeks}-week target &nbsp;·&nbsp; {lookback_weeks}-week lookback &nbsp;·&nbsp; "
+    f"{today.strftime('%B %d, %Y')} {stock_badge}",
+    unsafe_allow_html=True,
+)
+st.markdown("<br>", unsafe_allow_html=True)
 
-# ── KPI strip ─────────────────────────────────────────────────────────────────
-urgent_count       = len(df_plan[df_plan["_urgency_key"]==0])
-reorder_count      = len(df_plan[df_plan["_urgency_key"]<=1])
-total_units_needed = df_plan["Reorder Qty"].sum()
-total_value_needed = df_plan["Est. Value"].sum()
+# ── KPI section ───────────────────────────────────────────────────────────────
+# Raw KPIs
+urgent_n     = (df_plan["_uk"] == 0).sum()
+reorder_n    = (df_plan["_uk"] <= 1).sum()
+units_raw    = int(df_plan["Reorder Qty"].sum())
+value_raw    = df_plan["Est. Value"].sum()
 
-# Adjusted (display stock deducted)
-urgent_count_adj       = len(df_plan[df_plan["_urgency_key_adj"]==0])
-reorder_count_adj      = len(df_plan[df_plan["_urgency_key_adj"]<=1])
-total_units_needed_adj = df_plan["Reorder Qty (Adj)"].sum()
-total_value_needed_adj = df_plan["Est. Value (Adj)"].sum()
+# Adjusted KPIs
+urgent_n_adj  = (df_plan["_uk_adj"] == 0).sum()
+reorder_n_adj = (df_plan["_uk_adj"] <= 1).sum()
+units_adj     = int(df_plan["Reorder Qty (Adj)"].sum())
+value_adj     = df_plan["Est. Value (Adj)"].sum()
 
 if show_display:
-    # Show 2 rows of KPIs: raw on top, adjusted below
-    st.markdown("**Without display stock deduction** *(raw)*")
-    c1,c2,c3,c4 = st.columns(4)
+    # Two rows: raw on top, adjusted (purple) below
+    st.markdown('<p class="section-label">Without display stock (raw)</p>', unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns(4)
     for col, val, lbl, clr in [
-        (c1, f"🔴 {urgent_count}",              "Urgent — under 1 week",   "#dc2626"),
-        (c2, f"🟡 {reorder_count-urgent_count}", "Reorder Soon",            "#d97706"),
-        (c3, f"{int(total_units_needed):,}",    "Units to Reorder",         "#1d4ed8"),
-        (c4, fmt_npr(total_value_needed),       "Est. Value",               "#374151"),
+        (c1, f"🔴 {urgent_n}",          "Urgent (under 1 week)",    "#dc2626"),
+        (c2, f"🟡 {reorder_n-urgent_n}", "Reorder Soon",             "#d97706"),
+        (c3, f"{units_raw:,}",          "Units to Order",            "#1d4ed8"),
+        (c4, fmt_npr(value_raw),        "Estimated Value",           "#374151"),
     ]:
         with col:
-            st.markdown(f'<div class="kpi-box"><p class="kpi-val" style="color:{clr}">{val}</p>'
-                        f'<p class="kpi-lbl">{lbl}</p></div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="kpi">'
+                f'<p class="kpi-val" style="color:{clr}">{val}</p>'
+                f'<p class="kpi-lbl">{lbl}</p></div>',
+                unsafe_allow_html=True,
+            )
 
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("**After display stock deduction** *(adjusted — supervisor view)*")
-    d1,d2,d3,d4 = st.columns(4)
+    st.markdown(
+        '<p class="section-label" style="color:#7c3aed;border-color:#c4b5fd">'
+        '🪟 After display stock deduction (adjusted — supervisor view)</p>',
+        unsafe_allow_html=True,
+    )
+    d1, d2, d3, d4 = st.columns(4)
     for col, val, lbl, clr in [
-        (d1, f"🔴 {urgent_count_adj}",                  "Urgent — under 1 week",   "#dc2626"),
-        (d2, f"🟡 {reorder_count_adj-urgent_count_adj}", "Reorder Soon",            "#d97706"),
-        (d3, f"{int(total_units_needed_adj):,}",         "Units to Reorder (Adj)",  "#1d4ed8"),
-        (d4, fmt_npr(total_value_needed_adj),            "Est. Value (Adj)",        "#374151"),
+        (d1, f"🔴 {urgent_n_adj}",              "Urgent (under 1 week)",    "#dc2626"),
+        (d2, f"🟡 {reorder_n_adj-urgent_n_adj}", "Reorder Soon",             "#d97706"),
+        (d3, f"{units_adj:,}",                  "Units to Order (Adj)",     "#1d4ed8"),
+        (d4, fmt_npr(value_adj),                "Estimated Value (Adj)",    "#374151"),
     ]:
         with col:
-            st.markdown(f'<div class="kpi-box" style="border-color:#6366f1">'
-                        f'<p class="kpi-val" style="color:{clr}">{val}</p>'
-                        f'<p class="kpi-lbl">{lbl}</p></div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="kpi kpi-adj">'
+                f'<p class="kpi-val" style="color:{clr}">{val}</p>'
+                f'<p class="kpi-lbl">{lbl}</p></div>',
+                unsafe_allow_html=True,
+            )
 else:
-    c1,c2,c3,c4 = st.columns(4)
+    c1, c2, c3, c4 = st.columns(4)
     for col, val, lbl, clr in [
-        (c1, f"🔴 {urgent_count}",              "Urgent — under 1 week stock", "#dc2626"),
-        (c2, f"🟡 {reorder_count-urgent_count}", "Reorder Soon — under target", "#d97706"),
-        (c3, f"{int(total_units_needed):,}",    "Total Units to Reorder",       "#1d4ed8"),
-        (c4, fmt_npr(total_value_needed),       "Est. Reorder Value",           "#374151"),
+        (c1, f"🔴 {urgent_n}",          "Urgent — under 1 week",    "#dc2626"),
+        (c2, f"🟡 {reorder_n-urgent_n}", "Reorder Soon",             "#d97706"),
+        (c3, f"{units_raw:,}",          "Total Units to Order",      "#1d4ed8"),
+        (c4, fmt_npr(value_raw),        "Estimated Value",           "#374151"),
     ]:
         with col:
-            st.markdown(f'<div class="kpi-box"><p class="kpi-val" style="color:{clr}">{val}</p>'
-                        f'<p class="kpi-lbl">{lbl}</p></div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="kpi">'
+                f'<p class="kpi-val" style="color:{clr}">{val}</p>'
+                f'<p class="kpi-lbl">{lbl}</p></div>',
+                unsafe_allow_html=True,
+            )
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["🔴 Urgent & Reorder", "📊 Full Plan Table", "📍 By Location"])
+# ── Display stock explainer (shown when enabled) ──────────────────────────────
+if show_display:
+    with st.expander("ℹ️ How display stock works", expanded=False):
+        st.markdown("""
+**Display stock** is the minimum number of units that must always stay on the shop floor
+to keep shelves looking full. These units are *not* available to replenish from the back room.
 
+| Term | Meaning |
+|------|---------|
+| **Est. Stock** | Total on-hand (from Odoo / warehouse) |
+| **Display Stock** | Units locked on the floor (area-based formula) |
+| **Free Stock** | Est. Stock − Display Stock → the true buffer |
+| **Reorder Qty (Adj)** | How many units to order based on free stock |
+
+The formula scales display units by store size:
+
+> *Display Stock = Base Units × (Store Area ÷ 2,800 sq ft)*
+
+So Chitwan (500 sq ft) shows ~18% of what Baneshwor (2,800 sq ft) needs on display.
+""")
+        # Store display requirements table
+        st.markdown("**Current display stock per store for selected categories:**")
+        if parent_cats:
+            rows_ex = []
+            for store, area in STORE_AREA.items():
+                if area == 0: continue
+                for cat in (parent_cats[:6] if sel_cat == "All" else [sel_cat]):
+                    base = display_base.get(cat, DEFAULT_DISPLAY_FALLBACK)
+                    disp = round(base * (area / MAX_AREA))
+                    rows_ex.append({"Store": store, "Area (sq ft)": area,
+                                    "Category": cat, "Display Units": disp})
+            if rows_ex:
+                st.dataframe(pd.DataFrame(rows_ex), use_container_width=True, hide_index=True)
+
+st.markdown("---")
+
+# ── Tabs ──────────────────────────────────────────────────────────────────────
+tab1, tab2, tab3 = st.tabs(["🔴 Urgent & Reorder", "📊 Full Plan", "📍 By Location"])
+
+# ── Tab 1: Action list ────────────────────────────────────────────────────────
 with tab1:
-    # When display stock is on, show adjusted urgent list as primary
-    if show_display:
-        needs_action = df_plan[df_plan["_urgency_key_adj"] <= 1].copy()
-    else:
-        needs_action = df_plan[df_plan["_urgency_key"] <= 1].copy()
+    action_key = "_uk_adj" if show_display else "_uk"
+    needs_action = df_plan[df_plan[action_key] <= 1].copy()
 
     if needs_action.empty:
-        st.success("✅ All categories have sufficient stock cover. No urgent reorders needed.")
+        st.success("✅ All categories have sufficient cover — no urgent reorders.")
     else:
-        label = "adjusted (display-deducted)" if show_display else "raw"
-        st.markdown(f"**{len(needs_action)} category-location combinations need action** *({label})*")
+        view_label = "adjusted (after display deduction)" if show_display else "raw"
+        st.markdown(f"**{len(needs_action)} items need action** *({view_label})*")
+        st.markdown("")
+
         for _, r in needs_action.iterrows():
-            # Use adjusted urgency for card colour when display is on
-            uk  = r["_urgency_key_adj"] if show_display else r["_urgency_key"]
-            css = "urgent" if uk == 0 else "warning"
+            uk   = r["_uk_adj"] if show_display else r["_uk"]
+            css  = "card-urgent" if uk == 0 else "card-warning"
 
-            raw_wks  = f"{r['Weeks Cover']:.1f} wks"
-            adj_wks  = f"{r['Weeks Cover (Adj)']:.1f} wks"
-            sub_cat  = r.get("Sub Category","")
+            # Category label with sub-category
             cat_label = r["Category"]
-            if sub_cat and sub_cat not in ("","nan"):
-                cat_label = f"{r['Category']} <span style='color:#94a3b8;font-weight:400'>› {sub_cat}</span>"
+            sub       = r.get("Sub Category","")
+            if sub and sub not in ("","nan"):
+                cat_label = f'{r["Category"]} <span style="color:#94a3b8;font-weight:400">› {sub}</span>'
 
-            src_tag = ('<span class="src-badge" style="background:#dcfce7;color:#166534">real stock</span>'
-                       if r["Stock Source"]=="real" else
-                       '<span class="src-badge" style="background:#fef3c7;color:#92400e">est stock</span>')
-            season_tag = ""
+            # Badges
+            src_badge = (
+                '<span class="badge badge-real">real stock</span>'
+                if r["Stock Source"] == "real" else
+                '<span class="badge badge-est">est. stock</span>'
+            )
+            season_badge = ""
             if r["Season"] != "All-Season" and r["Season"] != CURRENT_SEASON:
-                season_tag = (f'<span class="src-badge" style="background:#f1f5f9;color:#475569">'
-                               f'{r["Season"]} item — off-season</span>')
-
-            # Display stock badge
-            disp_tag = ""
-            if show_display and r["Display Stock"] > 0:
-                disp_tag = (f'<span class="src-badge" style="background:#ede9fe;color:#5b21b6">'
-                             f'🪟 {int(r["Display Stock"])} on display</span>')
-
-            if show_display:
-                # 6-cell grid: stock, display, free, rate, weeks(adj), reorder(adj)
-                grid = (
-                    f'<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-top:10px">'
-                    f'<div><div style="font-size:10px;color:#94a3b8">Est. Stock {src_tag}</div>'
-                    f'<div style="font-size:14px;font-weight:600">{int(r["Est. Stock"]):,}</div></div>'
-                    f'<div><div style="font-size:10px;color:#94a3b8">🪟 Display</div>'
-                    f'<div style="font-size:14px;font-weight:600;color:#7c3aed">{int(r["Display Stock"]):,}</div></div>'
-                    f'<div><div style="font-size:10px;color:#94a3b8">Free Stock</div>'
-                    f'<div style="font-size:14px;font-weight:600;color:#0f766e">{int(r["Free Stock"]):,}</div></div>'
-                    f'<div><div style="font-size:10px;color:#94a3b8">Weekly Rate</div>'
-                    f'<div style="font-size:14px;font-weight:600">{r["Weekly Rate"]:.1f} u/wk</div></div>'
-                    f'<div><div style="font-size:10px;color:#94a3b8">Weeks Cover <span style="color:#7c3aed">(adj)</span></div>'
-                    f'<div style="font-size:14px;font-weight:600;color:{"#dc2626" if uk==0 else "#d97706"}">{adj_wks} <span style="font-size:10px;color:#94a3b8">raw:{raw_wks}</span></div></div>'
-                    f'<div><div style="font-size:10px;color:#94a3b8">Reorder Qty <span style="color:#7c3aed">(adj)</span></div>'
-                    f'<div style="font-size:14px;font-weight:600;color:#1d4ed8">{int(r["Reorder Qty (Adj)"]):,} <span style="font-size:10px;color:#94a3b8">raw:{int(r["Reorder Qty"]):,}</span></div></div>'
-                    f'</div>'
-                )
-            else:
-                weeks_str = f"{r['Weeks Cover']:.1f} weeks" if r['Weeks Cover'] < 99 else "No sales"
-                grid = (
-                    f'<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-top:10px">'
-                    f'<div><div style="font-size:10px;color:#94a3b8">Est. Stock {src_tag}</div>'
-                    f'<div style="font-size:15px;font-weight:600">{int(r["Est. Stock"]):,}</div></div>'
-                    f'<div><div style="font-size:10px;color:#94a3b8">Weekly Rate</div>'
-                    f'<div style="font-size:15px;font-weight:600">{r["Weekly Rate"]:.1f} u/wk</div></div>'
-                    f'<div><div style="font-size:10px;color:#94a3b8">Weeks Cover</div>'
-                    f'<div style="font-size:15px;font-weight:600;color:{"#dc2626" if uk==0 else "#d97706"}">{weeks_str}</div></div>'
-                    f'<div><div style="font-size:10px;color:#94a3b8">Reorder Qty</div>'
-                    f'<div style="font-size:15px;font-weight:600;color:#1d4ed8">{int(r["Reorder Qty"]):,} units</div></div>'
-                    f'<div><div style="font-size:10px;color:#94a3b8">Est. Value</div>'
-                    f'<div style="font-size:15px;font-weight:600">{fmt_npr(r["Est. Value"])}</div></div>'
-                    f'</div>'
-                )
+                season_badge = f'<span class="badge badge-offseason">{r["Season"]} — off-season</span>'
 
             urgency_show = r["Urgency (Adj)"] if show_display else r["Urgency"]
-            card_html = (
-                f'<div class="reorder-card {css}">'
-                f'<div style="display:flex;justify-content:space-between;align-items:center">'
-                f'<div>'
-                f'<span style="font-size:14px;font-weight:600;color:#0f172a">{cat_label}</span>'
-                f'<span style="font-size:12px;color:#64748b;margin-left:8px">📍 {r["Location"]}</span>'
-                f'{season_tag}{disp_tag}'
-                f'</div>'
-                f'<span style="font-size:13px;font-weight:600">{urgency_show}</span>'
-                f'</div>'
-                f'{grid}'
-                f'</div>'
-            )
+
+            if show_display:
+                # 6-column grid showing the full deduction story
+                grid = "".join([
+                    '<div style="display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin-top:12px">',
+                    # Est Stock
+                    f'<div><div style="font-size:10px;color:#94a3b8">Est. Stock {src_badge}</div>'
+                    f'<div style="font-size:15px;font-weight:700">{int(r["Est. Stock"]):,}</div></div>',
+                    # Display stock
+                    f'<div><div style="font-size:10px;color:#7c3aed">🪟 Display Stock</div>'
+                    f'<div style="font-size:15px;font-weight:700;color:#7c3aed">−{int(r["Display Stock"]):,}</div></div>',
+                    # Free stock
+                    f'<div><div style="font-size:10px;color:#0f766e;font-weight:600">= Free Stock</div>'
+                    f'<div style="font-size:15px;font-weight:700;color:#0f766e">{int(r["Free Stock"]):,}</div></div>',
+                    # Weekly rate
+                    f'<div><div style="font-size:10px;color:#94a3b8">Weekly Rate</div>'
+                    f'<div style="font-size:15px;font-weight:700">{r["Weekly Rate"]:.1f} u/wk</div></div>',
+                    # Weeks cover adj
+                    f'<div><div style="font-size:10px;color:#7c3aed">Weeks Cover (adj)</div>'
+                    f'<div style="font-size:15px;font-weight:700;color:{"#dc2626" if uk==0 else "#d97706"}">'
+                    f'{r["Weeks Cover (Adj)"]:.1f} wks'
+                    f'<span style="font-size:10px;color:#94a3b8;font-weight:400"> raw {r["Weeks Cover"]:.1f}</span>'
+                    f'</div></div>',
+                    # Reorder adj
+                    f'<div><div style="font-size:10px;color:#7c3aed">Reorder Qty (adj)</div>'
+                    f'<div style="font-size:15px;font-weight:700;color:#1d4ed8">'
+                    f'{int(r["Reorder Qty (Adj)"]):,}'
+                    f'<span style="font-size:10px;color:#94a3b8;font-weight:400"> raw {int(r["Reorder Qty"]):,}</span>'
+                    f'</div></div>',
+                    '</div>',
+                ])
+            else:
+                wks_str = f'{r["Weeks Cover"]:.1f} weeks' if r["Weeks Cover"] < 99 else "No sales"
+                grid = "".join([
+                    '<div style="display:grid;grid-template-columns:repeat(5,1fr);gap:12px;margin-top:12px">',
+                    f'<div><div style="font-size:10px;color:#94a3b8">Est. Stock {src_badge}</div>'
+                    f'<div style="font-size:15px;font-weight:700">{int(r["Est. Stock"]):,}</div></div>',
+                    f'<div><div style="font-size:10px;color:#94a3b8">Weekly Rate</div>'
+                    f'<div style="font-size:15px;font-weight:700">{r["Weekly Rate"]:.1f} u/wk</div></div>',
+                    f'<div><div style="font-size:10px;color:#94a3b8">Weeks Cover</div>'
+                    f'<div style="font-size:15px;font-weight:700;color:{"#dc2626" if uk==0 else "#d97706"}">{wks_str}</div></div>',
+                    f'<div><div style="font-size:10px;color:#94a3b8">Reorder Qty</div>'
+                    f'<div style="font-size:15px;font-weight:700;color:#1d4ed8">{int(r["Reorder Qty"]):,}</div></div>',
+                    f'<div><div style="font-size:10px;color:#94a3b8">Est. Value</div>'
+                    f'<div style="font-size:15px;font-weight:700">{fmt_npr(r["Est. Value"])}</div></div>',
+                    '</div>',
+                ])
+
+            card_html = "".join([
+                f'<div class="card {css}">',
+                '<div style="display:flex;justify-content:space-between;align-items:center">',
+                f'<div><span style="font-size:15px;font-weight:700;color:#0f172a">{cat_label}</span>',
+                f'<span style="font-size:12px;color:#64748b;margin-left:10px">📍 {r["Location"]}</span>',
+                season_badge, '</div>',
+                f'<span style="font-size:13px;font-weight:700">{urgency_show}</span>',
+                '</div>',
+                grid,
+                '</div>',
+            ])
             st.markdown(card_html, unsafe_allow_html=True)
 
+# ── Tab 2: Full table ─────────────────────────────────────────────────────────
 with tab2:
-    st.markdown("**Full reorder plan — all categories and locations**")
     if show_display:
-        st.info("🪟 Display stock is enabled. Each row shows both raw and adjusted (display-deducted) figures side by side.")
-        display_cols = [
-            "Urgency","Location","Category","Sub Category","Season",
-            "Est. Stock","Display Stock","Free Stock","Stock Source",
-            "Weekly Rate","Weeks Cover","Weeks Cover (Adj)",
-            "Target Stock","Reorder Qty","Reorder Qty (Adj)",
-            "Est. Value","Est. Value (Adj)","Urgency (Adj)"
+        st.info("🪟 Display stock enabled — both raw and adjusted figures shown.")
+        cols = [
+            "Urgency (Adj)", "Location", "Category", "Sub Category", "Season",
+            "Est. Stock", "Display Stock", "Free Stock", "Stock Source",
+            "Weekly Rate", "Weeks Cover", "Weeks Cover (Adj)",
+            "Target Stock", "Reorder Qty", "Reorder Qty (Adj)",
+            "Est. Value", "Est. Value (Adj)",
         ]
     else:
-        display_cols = [
-            "Urgency","Location","Category","Sub Category","Season",
-            "Est. Stock","Stock Source","Weekly Rate",
-            "Weeks Cover","Target Stock","Reorder Qty","Est. Value"
+        cols = [
+            "Urgency", "Location", "Category", "Sub Category", "Season",
+            "Est. Stock", "Stock Source", "Weekly Rate",
+            "Weeks Cover", "Target Stock", "Reorder Qty", "Est. Value",
         ]
-    display = df_plan[display_cols].copy()
-    display["Stock Source"] = display["Stock Source"].map({"real":"✅ Real","est":"≈ Estimated"})
-    for vcol in ["Est. Value","Est. Value (Adj)"]:
-        if vcol in display.columns:
-            display[vcol] = display[vcol].apply(fmt_npr)
-    st.dataframe(display, use_container_width=True, hide_index=True)
 
-    if st.button("⬇️ Download reorder plan as Excel"):
-        out = BytesIO()
-        export_df = df_plan[display_cols].copy()
-        export_df.to_excel(out, index=False, engine="openpyxl")
-        out.seek(0)
-        st.download_button(
-            "📥 Download Excel",
-            data=out,
-            file_name=f"reorder_plan_{sel_brand}_{today.strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+    display_df = df_plan[[c for c in cols if c in df_plan.columns]].copy()
+    display_df["Stock Source"] = display_df["Stock Source"].map({"real":"✅ Real","est":"≈ Est."})
+    for vc in ["Est. Value", "Est. Value (Adj)"]:
+        if vc in display_df.columns:
+            display_df[vc] = display_df[vc].apply(fmt_npr)
 
+    st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    out = BytesIO()
+    df_plan[[c for c in cols if c in df_plan.columns]].to_excel(out, index=False, engine="openpyxl")
+    out.seek(0)
+    st.download_button(
+        "⬇️ Download as Excel",
+        data=out,
+        file_name=f"reorder_plan_{sel_brand}_{today.strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+# ── Tab 3: By location ────────────────────────────────────────────────────────
 with tab3:
-    st.markdown("**Reorder need by location — total units and value**")
-    loc_summary = df_plan.groupby("Location").agg(
-        Categories=("Category","nunique"),
-        Urgent=("_urgency_key", lambda x: (x==0).sum()),
-        Reorder_Soon=("_urgency_key", lambda x: (x==1).sum()),
-        Total_Units=("Reorder Qty","sum"),
-        Total_Value=("Est. Value","sum"),
-    ).reset_index()
-    loc_summary["_o"] = loc_summary["Location"].apply(
-        lambda x: LOCATION_ORDER.index(x) if x in LOCATION_ORDER else 99)
-    loc_summary = loc_summary.sort_values("_o").drop(columns=["_o"])
-    loc_summary["Total_Value"] = loc_summary["Total_Value"].apply(fmt_npr)
-    loc_summary = loc_summary.rename(columns={
-        "Total_Units":"Units to Reorder",
-        "Total_Value":"Est. Value",
-        "Reorder_Soon":"Reorder Soon",
-    })
-    st.dataframe(loc_summary, use_container_width=True, hide_index=True)
+    uk_col     = "_uk_adj" if show_display else "_uk"
+    qty_col_s  = "Reorder Qty (Adj)" if show_display else "Reorder Qty"
+    val_col_s  = "Est. Value (Adj)"  if show_display else "Est. Value"
 
-    # Sub-category breakdown when a parent is selected
+    loc_summ = df_plan.groupby("Location").agg(
+        Categories=("Category", "nunique"),
+        Urgent=(uk_col, lambda x: (x == 0).sum()),
+        Reorder_Soon=(uk_col, lambda x: (x == 1).sum()),
+        Units=(qty_col_s, "sum"),
+        Value=(val_col_s, "sum"),
+    ).reset_index()
+    loc_summ["_o"] = loc_summ["Location"].apply(
+        lambda x: LOCATION_ORDER.index(x) if x in LOCATION_ORDER else 99)
+    loc_summ = loc_summ.sort_values("_o").drop(columns=["_o"])
+    loc_summ["Value"] = loc_summ["Value"].apply(fmt_npr)
+    loc_summ = loc_summ.rename(columns={
+        "Units": "Units to Order",
+        "Value": "Est. Value",
+        "Reorder_Soon": "Reorder Soon",
+    })
+    st.dataframe(loc_summ, use_container_width=True, hide_index=True)
+
     if sel_cat != "All":
         st.markdown(f"**Sub-category breakdown — {sel_cat}**")
-        sub_summary = df_plan.groupby("Sub Category").agg(
-            Locations=("Location","nunique"),
-            Urgent=("_urgency_key", lambda x: (x==0).sum()),
-            Reorder_Soon=("_urgency_key", lambda x: (x==1).sum()),
-            Total_Units=("Reorder Qty","sum"),
-            Total_Value=("Est. Value","sum"),
-            Avg_Weeks_Cover=("Weeks Cover","mean"),
+        sub_summ = df_plan.groupby("Sub Category").agg(
+            Locations=("Location", "nunique"),
+            Urgent=(uk_col, lambda x: (x == 0).sum()),
+            Reorder_Soon=(uk_col, lambda x: (x == 1).sum()),
+            Units=(qty_col_s, "sum"),
+            Value=(val_col_s, "sum"),
+            Avg_Wks_Cover=("Weeks Cover (Adj)" if show_display else "Weeks Cover", "mean"),
         ).reset_index()
-        sub_summary = sub_summary.sort_values("Total_Units", ascending=False)
-        sub_summary["Total_Value"]      = sub_summary["Total_Value"].apply(fmt_npr)
-        sub_summary["Avg_Weeks_Cover"]  = sub_summary["Avg_Weeks_Cover"].round(1)
-        sub_summary = sub_summary.rename(columns={
-            "Total_Units":"Units to Reorder",
-            "Total_Value":"Est. Value",
-            "Reorder_Soon":"Reorder Soon",
-            "Avg_Weeks_Cover":"Avg Weeks Cover",
+        sub_summ = sub_summ.sort_values("Units", ascending=False)
+        sub_summ["Value"]         = sub_summ["Value"].apply(fmt_npr)
+        sub_summ["Avg_Wks_Cover"] = sub_summ["Avg_Wks_Cover"].round(1)
+        sub_summ = sub_summ.rename(columns={
+            "Units": "Units to Order", "Value": "Est. Value",
+            "Reorder_Soon": "Reorder Soon", "Avg_Wks_Cover": "Avg Weeks Cover",
         })
-        st.dataframe(sub_summary, use_container_width=True, hide_index=True)
+        st.dataframe(sub_summ, use_container_width=True, hide_index=True)
