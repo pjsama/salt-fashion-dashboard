@@ -503,7 +503,22 @@ for _, loc_row in pos_agg.iterrows():
         reorder_qty  = max(0, round(target_stock - est_stock))
 
         # Display stock
-        display_units = calc_display(loc, cat, user_overrides) if show_display else 0
+        # The furniture data holds the TOTAL display capacity for the parent category
+        # (e.g. Lazimpat Tops = 116 total units across ALL Tops sub-categories).
+        # We must split this by the same sub_frac used for stock, so sub-categories
+        # share the parent display budget rather than each claiming the full total.
+        if show_display:
+            parent_display = calc_display(loc, cat, user_overrides)
+            # Determine the sub-fraction: same logic as the stock split above
+            _sub_sold_total = cat_stock[cat_stock["Category"] == cat]["Total_Sold"].sum()
+            if _sub_sold_total > 0:
+                _display_frac = cat_row["Total_Sold"] / _sub_sold_total
+            else:
+                _n_subs = len(cat_stock[cat_stock["Category"] == cat])
+                _display_frac = 1.0 / _n_subs if _n_subs > 0 else 1.0
+            display_units = round(parent_display * _display_frac)
+        else:
+            display_units = 0
         free_stock     = max(0, est_stock - display_units)
         weeks_cover_adj = (free_stock / daily_rate / 7) if daily_rate > 0 else 999
         reorder_qty_adj = max(0, round(target_stock - free_stock))
