@@ -32,7 +32,7 @@ GDRIVE_LOCSTK_ID    = "1zgTBhh7vOTjxEIz-LO3YSM-TXJeDUrBT"
 GDRIVE_RECENTCAT_ID = "1EMEw10v7zEwsMzrocJWCjkyRfy14LaIM"
 # Variant file (Odoo product.product export with Barcode, SKU, Name, Qty On Hand)
 # Upload your Product_Variant__product_product_.xlsx to Google Drive and paste the ID here
-GDRIVE_VARIANT_STOCK_ID = "1zNSEJReRHXPBNpU0mjmvH-ddu29QsVeM"   # ← paste file ID after uploading
+GDRIVE_VARIANT_STOCK_ID = "1qcS4YOb-wTQMY_88VvoX3P_RMRhcqfPK"   # ← paste file ID after uploading
 
 # ── Planning constants ────────────────────────────────────────────────────────
 MIN_REORDER_QTY = 5   # suppress "Reorder Soon" when the gap is trivially small
