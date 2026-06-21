@@ -729,10 +729,152 @@ Backstore racks and rails are excluded (those are already counted as buffer stoc
 st.markdown("---")
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["🔴 Urgent & Reorder", "📊 Full Plan", "📍 By Location"])
+tab1, tab2, tab3, tab4 = st.tabs(["📦 Overall Summary", "🔴 Urgent & Reorder", "📊 Full Plan", "📍 By Location"])
 
-# ── Tab 1: Action list ────────────────────────────────────────────────────────
+# ── Tab 1: Overall Summary ───────────────────────────────────────────────────
 with tab1:
+    qty_col_o = "Reorder Qty (Adj)" if show_display else "Reorder Qty"
+    val_col_o = "Est. Value (Adj)"  if show_display else "Est. Value"
+    uk_col_o  = "_uk_adj"           if show_display else "_uk"
+
+    st.markdown("### Total reorder needed across all stores")
+    st.caption(
+        "Aggregated across all locations — shows what to buy in total for each category. "
+        "Use the location filter in the sidebar to narrow to specific stores."
+    )
+
+    # ── Category × Sub Category summary ──────────────────────────────────────
+    cat_summ = df_plan.groupby(["Category", "Sub Category"]).agg(
+        Stores      =("Location",   "nunique"),
+        Est_Stock   =("Est. Stock", "sum"),
+        Free_Stock  =("Free Stock", "sum"),
+        Weekly_Rate =("Weekly Rate","sum"),
+        Order_Qty   =(qty_col_o,    "sum"),
+        Est_Value   =(val_col_o,    "sum"),
+        Urgent      =(uk_col_o, lambda x: (x == 0).sum()),
+        Reorder_Soon=(uk_col_o, lambda x: (x == 1).sum()),
+        Watch       =(uk_col_o, lambda x: (x == 2).sum()),
+    ).reset_index()
+
+    # Overall status for the row = worst status across all stores
+    def overall_status(row):
+        if row["Urgent"] > 0:      return "🔴 Urgent"
+        if row["Reorder_Soon"] > 0: return "🟡 Reorder Soon"
+        if row["Watch"] > 0:        return "⚠️ Watch"
+        return "🟢 OK"
+
+    cat_summ["Status"]       = cat_summ.apply(overall_status, axis=1)
+    cat_summ["_sort"]        = cat_summ["Status"].map(
+        {"🔴 Urgent": 0, "🟡 Reorder Soon": 1, "⚠️ Watch": 2, "🟢 OK": 3})
+    cat_summ["Avg Wks Cover"]= (cat_summ["Free_Stock"] / (cat_summ["Weekly_Rate"] / 7) / 7).round(1)
+    cat_summ["Avg Wks Cover"] = cat_summ["Avg Wks Cover"].apply(
+        lambda x: "—" if x > 50 or pd.isna(x) else f"{x:.1f} wks")
+
+    cat_summ = cat_summ.sort_values(["_sort", "Order_Qty"], ascending=[True, False])
+    cat_summ["Est_Value_fmt"] = cat_summ["Est_Value"].apply(fmt_npr)
+    cat_summ["Weekly_Rate"]   = cat_summ["Weekly_Rate"].round(1)
+
+    # ── KPI row ───────────────────────────────────────────────────────────────
+    total_units_all = int(cat_summ["Order_Qty"].sum())
+    total_value_all = cat_summ["Est_Value"].sum()
+    needs_action_all = (cat_summ["_sort"] <= 1).sum()
+    watch_all        = (cat_summ["_sort"] == 2).sum()
+    cats_all         = len(cat_summ)
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    for col, val, lbl, clr in [
+        (k1, f"{cats_all}",              "Category-Sub combinations", "#374151"),
+        (k2, f"🔴🟡 {needs_action_all}", "Need action (any store)",   "#dc2626"),
+        (k3, f"⚠️ {watch_all}",          "Watch (any store)",         "#f97316"),
+        (k4, f"{total_units_all:,}",     "Total Units to Order",      "#1d4ed8"),
+        (k5, fmt_npr(total_value_all),   "Total Est. Value",          "#374151"),
+    ]:
+        with col:
+            st.markdown(
+                f'<div class="kpi"><p class="kpi-val" style="color:{clr}">{val}</p>'
+                f'<p class="kpi-lbl">{lbl}</p></div>',
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Category rollup table (one row per Category, no sub-cat) ─────────────
+    st.markdown("**By Category — total across all stores**")
+    cat_rollup = df_plan.groupby("Category").agg(
+        Sub_Cats    =("Sub Category","nunique"),
+        Stores      =("Location",    "nunique"),
+        Total_Stock =("Est. Stock",  "sum"),
+        Free_Stock  =("Free Stock",  "sum"),
+        Weekly_Rate =("Weekly Rate", "sum"),
+        Order_Qty   =(qty_col_o,     "sum"),
+        Est_Value   =(val_col_o,     "sum"),
+        Urgent      =(uk_col_o, lambda x: (x == 0).sum()),
+        Reorder     =(uk_col_o, lambda x: (x == 1).sum()),
+        Watch       =(uk_col_o, lambda x: (x == 2).sum()),
+    ).reset_index()
+
+    cat_rollup["Status"] = cat_rollup.apply(
+        lambda r: "🔴 Urgent" if r["Urgent"] > 0
+             else ("🟡 Reorder" if r["Reorder"] > 0
+             else ("⚠️ Watch" if r["Watch"] > 0 else "🟢 OK")), axis=1)
+    cat_rollup["_s"] = cat_rollup["Status"].map(
+        {"🔴 Urgent":0,"🟡 Reorder":1,"⚠️ Watch":2,"🟢 OK":3})
+    cat_rollup = cat_rollup.sort_values(["_s","Order_Qty"], ascending=[True,False]).drop(columns=["_s"])
+    cat_rollup["Est_Value"] = cat_rollup["Est_Value"].apply(fmt_npr)
+    cat_rollup["Weekly_Rate"] = cat_rollup["Weekly_Rate"].round(1)
+    cat_rollup = cat_rollup.rename(columns={
+        "Sub_Cats":"Sub-cats", "Total_Stock":"Total Stock",
+        "Free_Stock":"Free Stock", "Weekly_Rate":"Weekly Rate (total)",
+        "Order_Qty":"Order Qty", "Est_Value":"Est. Value",
+        "Urgent":"🔴","Reorder":"🟡","Watch":"⚠️",
+    })
+    st.dataframe(
+        cat_rollup[["Status","Category","Sub-cats","Stores",
+                    "Total Stock","Free Stock","Weekly Rate (total)",
+                    "Order Qty","Est. Value","🔴","🟡","⚠️"]],
+        use_container_width=True, hide_index=True
+    )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # ── Sub-category detail table ─────────────────────────────────────────────
+    st.markdown("**By Sub-Category — detail view (all stores combined)**")
+    disp_summ = cat_summ[["Status","Category","Sub Category","Stores",
+                           "Est_Stock","Free_Stock","Weekly_Rate",
+                           "Avg Wks Cover","Order_Qty","Est_Value_fmt",
+                           "Urgent","Reorder_Soon","Watch"]].copy()
+    disp_summ = disp_summ.rename(columns={
+        "Sub Category":"Sub-cat",
+        "Est_Stock":"Total Stock",
+        "Free_Stock":"Free Stock",
+        "Weekly_Rate":"Weekly Rate",
+        "Order_Qty":"Order Qty",
+        "Est_Value_fmt":"Est. Value",
+        "Reorder_Soon":"🟡",
+        "Urgent":"🔴",
+        "Watch":"⚠️",
+    })
+    st.dataframe(
+        disp_summ[["Status","Category","Sub-cat","Stores",
+                   "Total Stock","Free Stock","Weekly Rate",
+                   "Avg Wks Cover","Order Qty","Est. Value","🔴","🟡","⚠️"]],
+        use_container_width=True, hide_index=True
+    )
+
+    # Download
+    out_overall = BytesIO()
+    export_overall = disp_summ.copy()
+    export_overall.to_excel(out_overall, index=False, engine="openpyxl")
+    out_overall.seek(0)
+    st.download_button(
+        "⬇️ Download Overall Summary as Excel",
+        data=out_overall,
+        file_name=f"reorder_summary_{sel_brand}_{today.strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+# ── Tab 2: Action list (was tab1) ─────────────────────────────────────────────
+with tab2:
     action_key = "_uk_adj" if show_display else "_uk"
     needs_action = df_plan[df_plan[action_key] <= 2].copy()
 
@@ -823,8 +965,8 @@ with tab1:
             ])
             st.markdown(card_html, unsafe_allow_html=True)
 
-# ── Tab 2: Full table ─────────────────────────────────────────────────────────
-with tab2:
+# ── Tab 3: Full table ─────────────────────────────────────────────────────────
+with tab3:
     # Always show the clean supervisor view — adjusted figures only when display is on.
     # "Est. Stock" is kept as context; raw Reorder Qty / Weeks Cover are hidden to avoid confusion.
     if show_display:
@@ -874,8 +1016,8 @@ with tab2:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
-# ── Tab 3: By location ────────────────────────────────────────────────────────
-with tab3:
+# ── Tab 4: By location ────────────────────────────────────────────────────────
+with tab4:
     uk_col     = "_uk_adj" if show_display else "_uk"
     qty_col_s  = "Reorder Qty (Adj)" if show_display else "Reorder Qty"
     val_col_s  = "Est. Value (Adj)"  if show_display else "Est. Value"
