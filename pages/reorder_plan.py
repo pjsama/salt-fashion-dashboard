@@ -733,61 +733,82 @@ tab1, tab2, tab3, tab4 = st.tabs(["📦 Overall Summary", "🔴 Urgent & Reorder
 
 # ── Tab 1: Overall Summary ───────────────────────────────────────────────────
 with tab1:
+    # ── POOLED calculation ────────────────────────────────────────────────────
+    # Treats all stores as one shared warehouse.
+    # Formula: Pool_Order = max(0, Target_Stock_total − Total_Free_Stock)
+    # where Target = target_weeks × total_weekly_rate across all stores.
+    # This answers: "How much do we need to buy from the supplier?"
+    # ignoring which store currently holds what — stock can be moved.
+    # The By Location tab shows store-specific gaps for distribution planning.
+
     qty_col_o = "Reorder Qty (Adj)" if show_display else "Reorder Qty"
     val_col_o = "Est. Value (Adj)"  if show_display else "Est. Value"
-    uk_col_o  = "_uk_adj"           if show_display else "_uk"
 
-    st.markdown("### Total reorder needed across all stores")
-    st.caption(
-        "Aggregated across all locations — shows what to buy in total for each category. "
-        "Use the location filter in the sidebar to narrow to specific stores."
-    )
-
-    # ── Category × Sub Category summary ──────────────────────────────────────
-    cat_summ = df_plan.groupby(["Category", "Sub Category"]).agg(
-        Stores      =("Location",   "nunique"),
-        Est_Stock   =("Est. Stock", "sum"),
-        Free_Stock  =("Free Stock", "sum"),
-        Weekly_Rate =("Weekly Rate","sum"),
-        Order_Qty   =(qty_col_o,    "sum"),
-        Est_Value   =(val_col_o,    "sum"),
-        Urgent      =(uk_col_o, lambda x: (x == 0).sum()),
-        Reorder_Soon=(uk_col_o, lambda x: (x == 1).sum()),
-        Watch       =(uk_col_o, lambda x: (x == 2).sum()),
+    # Aggregate totals per (Category, Sub Category) across all stores
+    pool_grp = df_plan.groupby(["Category", "Sub Category"]).agg(
+        Stores          =("Location",    "nunique"),
+        Total_Est_Stock =("Est. Stock",  "sum"),
+        Total_Free_Stock=("Free Stock",  "sum"),
+        Total_Weekly_Rate=("Weekly Rate","sum"),
+        Avg_Price       =("Est. Value",  lambda x:
+                          (x / df_plan.loc[x.index, qty_col_o].replace(0, pd.NA)).mean()),
     ).reset_index()
 
-    # Overall status for the row = worst status across all stores
-    def overall_status(row):
-        if row["Urgent"] > 0:      return "🔴 Urgent"
-        if row["Reorder_Soon"] > 0: return "🟡 Reorder Soon"
-        if row["Watch"] > 0:        return "⚠️ Watch"
-        return "🟢 OK"
+    # Pooled order qty: treat combined free stock vs combined target
+    pool_grp["Target_Stock"]    = (target_weeks * pool_grp["Total_Weekly_Rate"]).round()
+    pool_grp["Pool_Order_Qty"]  = (
+        pool_grp["Target_Stock"] - pool_grp["Total_Free_Stock"]
+    ).clip(lower=0).round().astype(int)
+    pool_grp["Weeks_Cover"]     = (
+        pool_grp["Total_Free_Stock"] /
+        (pool_grp["Total_Weekly_Rate"] / 7).replace(0, pd.NA) / 7
+    ).round(1)
 
-    cat_summ["Status"]       = cat_summ.apply(overall_status, axis=1)
-    cat_summ["_sort"]        = cat_summ["Status"].map(
-        {"🔴 Urgent": 0, "🟡 Reorder Soon": 1, "⚠️ Watch": 2, "🟢 OK": 3})
-    cat_summ["Avg Wks Cover"]= (cat_summ["Free_Stock"] / (cat_summ["Weekly_Rate"] / 7) / 7).round(1)
-    cat_summ["Avg Wks Cover"] = cat_summ["Avg Wks Cover"].apply(
-        lambda x: "—" if x > 50 or pd.isna(x) else f"{x:.1f} wks")
+    # Status based on pooled weeks cover (not individual store alerts)
+    def pool_status(row):
+        wk = row["Weeks_Cover"]
+        oq = row["Pool_Order_Qty"]
+        if pd.isna(wk) or wk > target_weeks:   return ("🟢 OK",        3)
+        if wk <= 1:                              return ("🔴 Urgent",    0)
+        if oq >= 5:                              return ("🟡 Reorder Soon", 1)
+        if oq >= 1:                              return ("⚠️ Watch",     2)
+        return ("🟢 OK", 3)
 
-    cat_summ = cat_summ.sort_values(["_sort", "Order_Qty"], ascending=[True, False])
-    cat_summ["Est_Value_fmt"] = cat_summ["Est_Value"].apply(fmt_npr)
-    cat_summ["Weekly_Rate"]   = cat_summ["Weekly_Rate"].round(1)
+    pool_grp[["Status","_sort"]] = pd.DataFrame(
+        pool_grp.apply(pool_status, axis=1).tolist(), index=pool_grp.index
+    )
+
+    # Avg price for value estimate — fall back to 0 if no price data
+    pool_grp["Avg_Price"] = pool_grp["Avg_Price"].fillna(0)
+    pool_grp["Est_Value"] = (pool_grp["Pool_Order_Qty"] * pool_grp["Avg_Price"]).round()
+
+    pool_grp["Weeks_Cover_fmt"] = pool_grp["Weeks_Cover"].apply(
+        lambda x: "—" if pd.isna(x) or x > 50 else f"{x:.1f} wks"
+    )
+    pool_grp = pool_grp.sort_values(["_sort","Pool_Order_Qty"], ascending=[True,False])
 
     # ── KPI row ───────────────────────────────────────────────────────────────
-    total_units_all = int(cat_summ["Order_Qty"].sum())
-    total_value_all = cat_summ["Est_Value"].sum()
-    needs_action_all = (cat_summ["_sort"] <= 1).sum()
-    watch_all        = (cat_summ["_sort"] == 2).sum()
-    cats_all         = len(cat_summ)
+    pool_order_total = int(pool_grp["Pool_Order_Qty"].sum())
+    pool_value_total = pool_grp["Est_Value"].sum()
+    pool_urgent      = (pool_grp["_sort"] == 0).sum()
+    pool_reorder     = (pool_grp["_sort"] == 1).sum()
+    pool_watch       = (pool_grp["_sort"] == 2).sum()
+
+    st.markdown("### 🏭 Supplier Order Summary")
+    st.caption(
+        "Stock treated as one shared pool across all stores. "
+        "**Order Qty = what to buy from supplier.** "
+        "For which store needs what, see the 📍 By Location tab."
+    )
+    st.markdown("<br>", unsafe_allow_html=True)
 
     k1, k2, k3, k4, k5 = st.columns(5)
     for col, val, lbl, clr in [
-        (k1, f"{cats_all}",              "Category-Sub combinations", "#374151"),
-        (k2, f"🔴🟡 {needs_action_all}", "Need action (any store)",   "#dc2626"),
-        (k3, f"⚠️ {watch_all}",          "Watch (any store)",         "#f97316"),
-        (k4, f"{total_units_all:,}",     "Total Units to Order",      "#1d4ed8"),
-        (k5, fmt_npr(total_value_all),   "Total Est. Value",          "#374151"),
+        (k1, f"🔴 {pool_urgent}",    "Urgent (pool)",        "#dc2626"),
+        (k2, f"🟡 {pool_reorder}",   "Reorder Soon (pool)",  "#d97706"),
+        (k3, f"⚠️ {pool_watch}",     "Watch (pool)",         "#f97316"),
+        (k4, f"{pool_order_total:,}","Total Units to Buy",   "#1d4ed8"),
+        (k5, fmt_npr(pool_value_total), "Est. Supplier Cost", "#374151"),
     ]:
         with col:
             st.markdown(
@@ -798,78 +819,79 @@ with tab1:
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── Category rollup table (one row per Category, no sub-cat) ─────────────
-    st.markdown("**By Category — total across all stores**")
-    cat_rollup = df_plan.groupby("Category").agg(
-        Sub_Cats    =("Sub Category","nunique"),
-        Stores      =("Location",    "nunique"),
-        Total_Stock =("Est. Stock",  "sum"),
-        Free_Stock  =("Free Stock",  "sum"),
-        Weekly_Rate =("Weekly Rate", "sum"),
-        Order_Qty   =(qty_col_o,     "sum"),
-        Est_Value   =(val_col_o,     "sum"),
-        Urgent      =(uk_col_o, lambda x: (x == 0).sum()),
-        Reorder     =(uk_col_o, lambda x: (x == 1).sum()),
-        Watch       =(uk_col_o, lambda x: (x == 2).sum()),
+    # ── Category rollup ───────────────────────────────────────────────────────
+    st.markdown("**By Category — total to buy from supplier**")
+    cat_pool = pool_grp.groupby("Category").agg(
+        Sub_cats        =("Sub Category",      "nunique"),
+        Stores          =("Stores",            "max"),
+        Total_Stock     =("Total_Est_Stock",   "sum"),
+        Free_Stock      =("Total_Free_Stock",  "sum"),
+        Weekly_Rate     =("Total_Weekly_Rate", "sum"),
+        Order_Qty       =("Pool_Order_Qty",    "sum"),
+        Est_Value       =("Est_Value",         "sum"),
     ).reset_index()
-
-    cat_rollup["Status"] = cat_rollup.apply(
-        lambda r: "🔴 Urgent" if r["Urgent"] > 0
-             else ("🟡 Reorder" if r["Reorder"] > 0
-             else ("⚠️ Watch" if r["Watch"] > 0 else "🟢 OK")), axis=1)
-    cat_rollup["_s"] = cat_rollup["Status"].map(
-        {"🔴 Urgent":0,"🟡 Reorder":1,"⚠️ Watch":2,"🟢 OK":3})
-    cat_rollup = cat_rollup.sort_values(["_s","Order_Qty"], ascending=[True,False]).drop(columns=["_s"])
-    cat_rollup["Est_Value"] = cat_rollup["Est_Value"].apply(fmt_npr)
-    cat_rollup["Weekly_Rate"] = cat_rollup["Weekly_Rate"].round(1)
-    cat_rollup = cat_rollup.rename(columns={
-        "Sub_Cats":"Sub-cats", "Total_Stock":"Total Stock",
-        "Free_Stock":"Free Stock", "Weekly_Rate":"Weekly Rate (total)",
-        "Order_Qty":"Order Qty", "Est_Value":"Est. Value",
-        "Urgent":"🔴","Reorder":"🟡","Watch":"⚠️",
+    cat_pool["Weeks_Cover"] = (
+        cat_pool["Free_Stock"] /
+        (cat_pool["Weekly_Rate"] / 7).replace(0, pd.NA) / 7
+    ).round(1).apply(lambda x: "—" if pd.isna(x) or x > 50 else f"{x:.1f} wks")
+    cat_pool["Status"] = cat_pool["Order_Qty"].apply(
+        lambda q: "🟡 Reorder" if q >= 5 else ("⚠️ Watch" if q >= 1 else "🟢 OK"))
+    cat_pool["_s"] = cat_pool["Order_Qty"].apply(lambda q: 0 if q >= 5 else (1 if q >= 1 else 2))
+    cat_pool = cat_pool.sort_values(["_s","Order_Qty"], ascending=[True,False]).drop(columns=["_s"])
+    cat_pool["Est_Value"]   = cat_pool["Est_Value"].apply(fmt_npr)
+    cat_pool["Weekly_Rate"] = cat_pool["Weekly_Rate"].round(1)
+    cat_pool = cat_pool.rename(columns={
+        "Total_Stock":"Total Stock","Free_Stock":"Free Stock",
+        "Weekly_Rate":"Weekly Rate","Order_Qty":"Order Qty","Est_Value":"Est. Value",
     })
     st.dataframe(
-        cat_rollup[["Status","Category","Sub-cats","Stores",
-                    "Total Stock","Free Stock","Weekly Rate (total)",
-                    "Order Qty","Est. Value","🔴","🟡","⚠️"]],
+        cat_pool[["Status","Category","Sub-cats","Stores","Total Stock",
+                  "Free Stock","Weekly Rate","Weeks_Cover","Order Qty","Est. Value"]],
         use_container_width=True, hide_index=True
     )
 
     st.markdown("<br>", unsafe_allow_html=True)
 
-    # ── Sub-category detail table ─────────────────────────────────────────────
-    st.markdown("**By Sub-Category — detail view (all stores combined)**")
-    disp_summ = cat_summ[["Status","Category","Sub Category","Stores",
-                           "Est_Stock","Free_Stock","Weekly_Rate",
-                           "Avg Wks Cover","Order_Qty","Est_Value_fmt",
-                           "Urgent","Reorder_Soon","Watch"]].copy()
-    disp_summ = disp_summ.rename(columns={
-        "Sub Category":"Sub-cat",
-        "Est_Stock":"Total Stock",
-        "Free_Stock":"Free Stock",
-        "Weekly_Rate":"Weekly Rate",
-        "Order_Qty":"Order Qty",
-        "Est_Value_fmt":"Est. Value",
-        "Reorder_Soon":"🟡",
-        "Urgent":"🔴",
-        "Watch":"⚠️",
+    # ── Sub-category detail ───────────────────────────────────────────────────
+    st.markdown("**By Sub-Category — detail (pooled)**")
+    sub_disp = pool_grp[[
+        "Status","Category","Sub Category","Stores",
+        "Total_Est_Stock","Total_Free_Stock","Total_Weekly_Rate",
+        "Weeks_Cover_fmt","Target_Stock","Pool_Order_Qty","Est_Value"
+    ]].copy().rename(columns={
+        "Sub Category":      "Sub-cat",
+        "Total_Est_Stock":   "Total Stock",
+        "Total_Free_Stock":  "Free Stock",
+        "Total_Weekly_Rate": "Weekly Rate",
+        "Weeks_Cover_fmt":   "Weeks Cover",
+        "Target_Stock":      "Target Stock",
+        "Pool_Order_Qty":    "Order Qty",
+        "Est_Value":         "Est. Value",
     })
+    sub_disp["Est. Value"] = sub_disp["Est. Value"].apply(fmt_npr)
+    sub_disp["Weekly Rate"] = sub_disp["Weekly Rate"].round(1)
     st.dataframe(
-        disp_summ[["Status","Category","Sub-cat","Stores",
-                   "Total Stock","Free Stock","Weekly Rate",
-                   "Avg Wks Cover","Order Qty","Est. Value","🔴","🟡","⚠️"]],
+        sub_disp[["Status","Category","Sub-cat","Stores","Total Stock",
+                  "Free Stock","Weekly Rate","Weeks Cover","Target Stock","Order Qty","Est. Value"]],
         use_container_width=True, hide_index=True
+    )
+
+    # ── Note about store distribution ─────────────────────────────────────────
+    st.info(
+        "💡 **This tab shows what to buy from the supplier** — treating all stores as one pool. "
+        "Even if total chain free stock is above target (Order Qty = 0), individual stores "
+        "may still need stock moved between locations. "
+        "See the **📍 By Location** tab for store-level distribution gaps."
     )
 
     # Download
     out_overall = BytesIO()
-    export_overall = disp_summ.copy()
-    export_overall.to_excel(out_overall, index=False, engine="openpyxl")
+    sub_disp.to_excel(out_overall, index=False, engine="openpyxl")
     out_overall.seek(0)
     st.download_button(
-        "⬇️ Download Overall Summary as Excel",
+        "⬇️ Download Supplier Order as Excel",
         data=out_overall,
-        file_name=f"reorder_summary_{sel_brand}_{today.strftime('%Y%m%d')}.xlsx",
+        file_name=f"supplier_order_{sel_brand}_{today.strftime('%Y%m%d')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
