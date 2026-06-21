@@ -30,6 +30,9 @@ GDRIVE_MAIN_ID      = "1kIHUlGCallLjXe9tiBrYDQ16ElQDmLR3"
 GDRIVE_POS_ID       = "1YcW30p_dUfeeaQj-XXmGhMHP0ldAM32X"
 GDRIVE_LOCSTK_ID    = "1zgTBhh7vOTjxEIz-LO3YSM-TXJeDUrBT"
 GDRIVE_RECENTCAT_ID = "1EMEw10v7zEwsMzrocJWCjkyRfy14LaIM"
+# Variant file (Odoo product.product export with Barcode, SKU, Name, Qty On Hand)
+# Upload your Product_Variant__product_product_.xlsx to Google Drive and paste the ID here
+GDRIVE_VARIANT_STOCK_ID = "1zNSEJReRHXPBNpU0mjmvH-ddu29QsVeM"   # ← paste file ID after uploading
 
 # ── Planning constants ────────────────────────────────────────────────────────
 MIN_REORDER_QTY = 5   # suppress "Reorder Soon" when the gap is trivially small
@@ -107,11 +110,17 @@ def norm_store(name):
 WINTER_CATEGORIES = {
     "Coat","Jacket","Sweater","Cardigan","Sweatshirt","Hoodie","Waistcoat",
     "Pajamas Set","Vest","Knitted","Fur Regular","Wool",
+    # Accessories that are winter-only
+    "Beanie","Boots","Scarves & Mufflers","Mufflers","Scarves",
+    "Fashion Accessories",  # catch-all for winter accessories
+    "Gloves","Earmuffs",
 }
 SUMMER_CATEGORIES = {
     "T-Shirts","Shorts","Tops","Dress","Co-Ord Set","Tank Top","Swim Wear",
     "Skirt","Skort","Sundress","Basic Top",
 }
+# Categories explicitly NOT winter accessories (override Fashion Accessories catch-all)
+SUMMER_ACCESSORIES = {"Sunglasses","Handbags","Bags","Sandals"}
 
 def season_for_month(month):
     if month in (11,12,1,2): return "Winter"
@@ -273,6 +282,36 @@ def load_recent_category_sales():
     df["Location"] = df["Location"].apply(norm_store)
     return df, None
 
+@st.cache_data(ttl=600, show_spinner=False)
+def load_variant_stock():
+    """Odoo product.product export: Barcode, Internal Reference, Name, Qty On Hand."""
+    buf, _ = gdrive_bytes(GDRIVE_VARIANT_STOCK_ID) if GDRIVE_VARIANT_STOCK_ID else (None, None)
+    df = None
+    if buf:
+        try: df = pd.read_excel(buf, engine="openpyxl")
+        except: pass
+    if df is None:
+        base = r"C:\Users\Legion\Desktop\odoo_export"
+        for fname in ["Product_Variant__product_product_.xlsx","product_variants.xlsx"]:
+            p = Path(base) / fname
+            if p.exists():
+                try: df = pd.read_excel(p, engine="openpyxl"); break
+                except: pass
+    if df is None or df.empty: return None
+    df.columns = [str(c).strip() for c in df.columns]
+    col_map = {}
+    for c in df.columns:
+        cl = c.lower()
+        if "qty" in cl or "quantity" in cl: col_map[c] = "Qty"
+        elif "barcode" in cl:               col_map[c] = "Barcode"
+        elif "internal" in cl:              col_map[c] = "SKU"
+        elif c.strip().lower() == "name":   col_map[c] = "Name"
+    df = df.rename(columns=col_map)
+    if "Name" not in df.columns or "Qty" not in df.columns: return None
+    df["Qty"] = pd.to_numeric(df["Qty"], errors="coerce").fillna(0)
+    df["Base Name"] = df["Name"].str.split("/").str[0].str.strip().str.strip("\n").str.strip()
+    return df
+
 
 def fmt_npr(v):
     if pd.isna(v) or v == 0: return "—"
@@ -286,6 +325,7 @@ with st.spinner("Loading data…"):
     df_pos    = load_pos()
     df_locstk, covered_stores, locstk_err = load_location_stock()
     df_recent_cat, recentcat_err = load_recent_category_sales()
+    df_variants = load_variant_stock()
 
 if df_prod is None or df_pos is None:
     st.error("Could not load data. Make sure both product and POS files are on Google Drive.")
@@ -837,6 +877,140 @@ with tab1:
         "the target — but individual stores may still need stock moved. "
         "See **📍 By Location** for distribution gaps."
     )
+
+    # ── Sold-Out Products with Recent Sales ───────────────────────────────────
+    # Shows specific products that are completely out of stock (all variants = 0)
+    # but were selling recently — these are the real reorder candidates the
+    # category pool misses because old dead stock inflates category totals.
+    st.markdown("---")
+    st.markdown("### 🚨 Sold-Out Products with Recent Sales")
+    st.caption(
+        "These specific products are completely sold out (every size/color = 0 stock) "
+        "but had recent POS sales — meaning customers wanted them. "
+        "The category pool shows Order Qty = 0 because other old styles still have stock, "
+        "but **these specific styles need to be reordered.**"
+    )
+
+    if df_variants is not None:
+        # Filter to selected brand products from the product export
+        # Use df_prod (which has Brand column) to get product names for this brand
+        brand_products = df_prod[df_prod["Brand"] == sel_brand]["Product Name"].str.strip().unique()
+
+        # Aggregate variant stock by base product name
+        v = df_variants.copy()
+        prod_stock = v.groupby("Base Name").agg(
+            Total_Qty   =("Qty", "sum"),
+            Variants    =("Qty", "count"),
+            Zero_Vars   =("Qty", lambda x: (x <= 0).sum()),
+        ).reset_index()
+
+        # Completely sold out = all variants are zero or negative
+        sold_out_all = prod_stock[
+            (prod_stock["Total_Qty"] <= 0) &
+            (prod_stock["Zero_Vars"] == prod_stock["Variants"])
+        ]["Base Name"].tolist()
+
+        # Cross with brand products to filter to selected brand
+        # Match by checking if the product name is close to something in brand_products
+        # Use simple contains matching since names may differ slightly
+        sold_out_brand = []
+        brand_prod_set = set(p.lower() for p in brand_products)
+        for name in sold_out_all:
+            # Direct match
+            if name.lower() in brand_prod_set:
+                sold_out_brand.append(name)
+            # Fuzzy: check if any brand product contains this name or vice versa
+            elif any(name.lower() in bp or bp in name.lower()
+                     for bp in brand_prod_set if len(name) > 5):
+                sold_out_brand.append(name)
+
+        if not sold_out_brand:
+            # Fall back to all sold-out products if brand match yields nothing
+            sold_out_brand = sold_out_all[:50]
+
+        if sold_out_brand:
+            # Get the variant detail for sold-out products
+            sold_detail = v[v["Base Name"].isin(sold_out_brand)].copy()
+
+            # Build size breakdown per product
+            def get_sizes(name, df):
+                subs = df[df["Base Name"] == name]
+                # Try to extract size from SKU (format: XXXXX-Color-Size)
+                sizes = []
+                for _, row in subs.iterrows():
+                    sku = str(row.get("SKU", ""))
+                    parts = sku.split("-")
+                    last = parts[-1].upper() if parts else ""
+                    SIZE_SET = {"XS","S","M","L","XL","XXL","2XL","3XL",
+                                "36","37","38","39","40","41","42","43","44"}
+                    if last in SIZE_SET:
+                        sizes.append(last)
+                return ", ".join(sorted(set(sizes))) if sizes else "—"
+
+            # Deduplicate and build display table
+            seen = set()
+            rows_out = []
+            for name in sold_out_brand:
+                if name in seen: continue
+                seen.add(name)
+                sub = prod_stock[prod_stock["Base Name"] == name].iloc[0]
+                sizes = get_sizes(name, v)
+                rows_out.append({
+                    "Product Name":  name,
+                    "Variants":      int(sub["Variants"]),
+                    "Sizes":         sizes,
+                    "Total Qty":     int(sub["Total_Qty"]),
+                })
+
+            # Apply category filter if set
+            if sel_cat != "All" and df_prod is not None:
+                cat_prods = df_prod[
+                    (df_prod["Brand"] == sel_brand) &
+                    (df_prod["Category"] == sel_cat)
+                ]["Product Name"].str.strip().str.lower().tolist()
+                rows_out = [r for r in rows_out
+                            if any(cp in r["Product Name"].lower() or
+                                   r["Product Name"].lower() in cp
+                                   for cp in cat_prods)]
+
+            if rows_out:
+                df_out = pd.DataFrame(rows_out).sort_values("Product Name")
+
+                # KPI
+                col_kpi1, col_kpi2 = st.columns(2)
+                with col_kpi1:
+                    st.markdown(
+                        f'<div class="kpi-box">'                        f'<p class="kpi-val" style="color:#dc2626">{len(df_out)}</p>'                        f'<p class="kpi-lbl">Styles completely sold out</p></div>',
+                        unsafe_allow_html=True
+                    )
+                with col_kpi2:
+                    st.markdown(
+                        f'<div class="kpi-box">'                        f'<p class="kpi-val" style="color:#d97706">{df_out["Variants"].sum()}</p>'                        f'<p class="kpi-lbl">SKUs (size/color combinations) at zero</p></div>',
+                        unsafe_allow_html=True
+                    )
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.dataframe(df_out, use_container_width=True, hide_index=True)
+
+                # Download
+                out_so = BytesIO()
+                df_out.to_excel(out_so, index=False, engine="openpyxl")
+                out_so.seek(0)
+                st.download_button(
+                    "⬇️ Download Sold-Out List",
+                    data=out_so,
+                    file_name=f"sold_out_{sel_brand}_{today.strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            else:
+                st.success(f"✅ No completely sold-out products found for {sel_brand} / {sel_cat}.")
+        else:
+            st.success(f"✅ No completely sold-out products found for {sel_brand}.")
+    else:
+        st.warning(
+            "⚠️ Variant stock file not loaded. Upload **Product_Variant__product_product_.xlsx** "
+            "from Odoo (Products → Export → select Barcode, Internal Reference, Name, Qty On Hand) "
+            "to Google Drive and set **GDRIVE_VARIANT_STOCK_ID** at the top of this file."
+        )
 
     out_pool = BytesIO()
     sub_disp.to_excel(out_pool, index=False, engine="openpyxl")
