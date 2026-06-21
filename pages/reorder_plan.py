@@ -30,7 +30,9 @@ GDRIVE_MAIN_ID      = "1kIHUlGCallLjXe9tiBrYDQ16ElQDmLR3"
 GDRIVE_POS_ID       = "1YcW30p_dUfeeaQj-XXmGhMHP0ldAM32X"
 GDRIVE_LOCSTK_ID    = "1zgTBhh7vOTjxEIz-LO3YSM-TXJeDUrBT"
 GDRIVE_RECENTCAT_ID = "1EMEw10v7zEwsMzrocJWCjkyRfy14LaIM"
-GDRIVE_VARIANT_STOCK_ID = "1qcS4YOb-wTQMY_88VvoX3P_RMRhcqfPK"
+# Variant file (Odoo product.product export with Barcode, SKU, Name, Qty On Hand)
+# Upload your Product_Variant__product_product_.xlsx to Google Drive and paste the ID here
+GDRIVE_VARIANT_STOCK_ID = "1qcS4YOb-wTQMY_88VvoX3P_RMRhcqfPK"   # ← paste file ID after uploading
 
 # ── Planning constants ────────────────────────────────────────────────────────
 MIN_REORDER_QTY = 5   # suppress "Reorder Soon" when the gap is trivially small
@@ -108,12 +110,17 @@ def norm_store(name):
 WINTER_CATEGORIES = {
     "Coat","Jacket","Sweater","Cardigan","Sweatshirt","Hoodie","Waistcoat",
     "Pajamas Set","Vest","Knitted","Fur Regular","Wool",
-    "Beanie","Boots","Scarves & Mufflers","Mufflers","Scarves","Gloves",
+    # Accessories that are winter-only
+    "Beanie","Boots","Scarves & Mufflers","Mufflers","Scarves",
+    "Fashion Accessories",  # catch-all for winter accessories
+    "Gloves","Earmuffs",
 }
 SUMMER_CATEGORIES = {
     "T-Shirts","Shorts","Tops","Dress","Co-Ord Set","Tank Top","Swim Wear",
     "Skirt","Skort","Sundress","Basic Top",
 }
+# Categories explicitly NOT winter accessories (override Fashion Accessories catch-all)
+SUMMER_ACCESSORIES = {"Sunglasses","Handbags","Bags","Sandals"}
 
 def season_for_month(month):
     if month in (11,12,1,2): return "Winter"
@@ -275,72 +282,6 @@ def load_recent_category_sales():
     df["Location"] = df["Location"].apply(norm_store)
     return df, None
 
-
-# ── SKU prefix → brand mapping ───────────────────────────────────────────────
-SKU_BRAND_PREFIXES = {
-    "SA-":  "SALT",  "SA-0": "SALT",  "SA-1": "SALT",  "SA-2": "SALT",
-    "SA-G": "SALT",  "SA-B": "SALT",  "SA-S": "SALT",  "SFPL": "SALT",
-    "WA-":  "Wasabi",
-    "PE-":  "Pepper",
-    "RA24": "Aadhya","AD-J": "Aadhya",
-    "JK24": "Jeevee Kids",
-}
-
-def sku_to_brand(sku):
-    sku = str(sku).strip()
-    for prefix, brand in SKU_BRAND_PREFIXES.items():
-        if sku.startswith(prefix):
-            return brand
-    return ""
-
-def parse_variant_name(name):
-    """Parse Odoo variant display_name into (base_name, color, size).
-    Handles formats:
-      - '[SA-0114Red-XS] Fiery Red Dress'  (display_name with [SKU] prefix)
-      - '[WA-G240917-G07-White-S] Wide Dress'
-      - 'Product Name - Color/Size'
-      - 'Product Name/Color'
-    """
-    import re as _re
-    SIZE_SET = {"XS","S","M","L","XL","XXL","2XL","3XL","4XL",
-                "36","37","38","39","40","41","42","43","44","ONE SIZE","FREE SIZE"}
-    name = str(name).strip().strip("\n").strip()
-    sku_in_name = ""
-    size = ""; color = ""
-
-    # Strip [SKU] prefix — e.g. "[SA-0114Red-XS] Product Name"
-    m = _re.match(r"^\[([^\]]+)\]\s*", name)
-    if m:
-        sku_in_name = m.group(1)
-        name = name[m.end():].strip()
-
-    # "/Size" suffix — e.g. "Product Name/XS"
-    if "/" in name:
-        parts = name.rsplit("/", 1)
-        pot = parts[1].strip().upper()
-        if pot in SIZE_SET:
-            size = pot; name = parts[0].strip()
-
-    # " - Color" suffix — e.g. "Product Name - Apricot"
-    if " - " in name:
-        parts = name.rsplit(" - ", 1)
-        color = parts[1].strip(); name = parts[0].strip()
-
-    # Fallback: extract size/color from the [SKU] part if still missing
-    # e.g. "SA-0114Red-XS" → size=XS, color=Red (rough)
-    if sku_in_name and not size:
-        sp = sku_in_name.split("-")
-        last = sp[-1].strip().upper()
-        if last in SIZE_SET:
-            size = last
-            # Color is the part before the size suffix
-            if len(sp) >= 2:
-                raw_color = sp[-2].strip()
-                # Remove leading digits (SA-0113Khaki → Khaki)
-                color = _re.sub(r"^\d+", "", raw_color).strip() or raw_color
-
-    return name.strip(), color, size
-
 @st.cache_data(ttl=600, show_spinner=False)
 def load_variant_stock():
     """Odoo product.product export: Barcode, Internal Reference, Name, Qty On Hand."""
@@ -351,8 +292,7 @@ def load_variant_stock():
         except: pass
     if df is None:
         base = r"C:\Users\Legion\Desktop\odoo_export"
-        for fname in ["Product_Variant__product_product_.xlsx","product_variants.xlsx",
-                      "variant_stock.xlsx"]:
+        for fname in ["Product_Variant__product_product_.xlsx","product_variants.xlsx"]:
             p = Path(base) / fname
             if p.exists():
                 try: df = pd.read_excel(p, engine="openpyxl"); break
@@ -369,17 +309,9 @@ def load_variant_stock():
     df = df.rename(columns=col_map)
     if "Name" not in df.columns or "Qty" not in df.columns: return None
     df["Qty"] = pd.to_numeric(df["Qty"], errors="coerce").fillna(0)
-    # Parse brand from SKU
-    if "SKU" in df.columns:
-        df["Brand"] = df["SKU"].fillna("").apply(sku_to_brand)
-    else:
-        df["Brand"] = ""
-    # Parse base name, color, size
-    parsed = df["Name"].apply(parse_variant_name)
-    df["Base Name"] = parsed.apply(lambda x: x[0])
-    df["Color"]     = parsed.apply(lambda x: x[1])
-    df["Size"]      = parsed.apply(lambda x: x[2])
+    df["Base Name"] = df["Name"].str.split("/").str[0].str.strip().str.strip("\n").str.strip()
     return df
+
 
 def fmt_npr(v):
     if pd.isna(v) or v == 0: return "—"
@@ -444,13 +376,16 @@ with st.sidebar:
 
     SEASON_OPTIONS = ["All", "Summer (+ All-Season)", "Winter (+ All-Season)", "All-Season only"]
     sel_season_raw = st.selectbox(
-        "Season", SEASON_OPTIONS, index=1,
-        help="Summer and Winter both include All-Season items (Denim, Leggings etc.)")
+        "Season",
+        SEASON_OPTIONS,
+        index=1,  # default to Summer
+        help="Summer and Winter both include All-Season items (Denim, Leggings etc.)"
+    )
     sel_season = {
-        "All":                     "All",
-        "Summer (+ All-Season)":   "Summer",
-        "Winter (+ All-Season)":   "Winter",
-        "All-Season only":         "All-Season",
+        "All":                      "All",
+        "Summer (+ All-Season)":    "Summer",
+        "Winter (+ All-Season)":    "Winter",
+        "All-Season only":          "All-Season",
     }[sel_season_raw]
 
     # ── Display stock settings ─────────────────────────────────────────────────
@@ -738,6 +673,7 @@ if sel_cat != "All":
     df_plan = df_plan[df_plan["Category"] == sel_cat]
 if sel_sub_cat != "All":
     df_plan = df_plan[df_plan["Sub Category"] == sel_sub_cat]
+# Season filter: Summer/Winter includes All-Season items (Denim, Leggings — year-round)
 if sel_season != "All":
     df_plan = df_plan[
         (df_plan["Season"] == sel_season) |
@@ -747,186 +683,6 @@ if sel_season != "All":
 df_plan = df_plan.sort_values(["_urgency_key","Reorder Qty"], ascending=[True,False])
 
 # ── Header ────────────────────────────────────────────────────────────────────
-def _show_overall():
-    """Overall Summary tab: pooled supplier order + sold-out/missing-size alert."""
-    qty_col_o = "Reorder Qty (Adj)" if show_display else "Reorder Qty"
-
-    pool = df_plan.groupby(["Category", "Sub Category"]).agg(
-        Stores      =("Location",   "nunique"),
-        Total_Stock =("Est. Stock", "sum"),
-        Total_Free  =("Free Stock", "sum"),
-        Total_Rate  =("Weekly Rate","sum"),
-    ).reset_index()
-    pool["Target"]    = (target_weeks * pool["Total_Rate"]).round()
-    pool["Order_Qty"] = (pool["Target"] - pool["Total_Free"]).clip(lower=0).round().astype(int)
-    pool["Wks_Cover"] = (
-        pool["Total_Free"] / (pool["Total_Rate"]/7).replace(0, float("nan")) / 7
-    ).round(1)
-
-    def _pstatus(row):
-        import math
-        wk, oq = row["Wks_Cover"], row["Order_Qty"]
-        if math.isnan(wk) or wk > target_weeks: return ("OK",      3)
-        if wk <= 1:    return ("Urgent",      0)
-        if oq >= 5:    return ("Reorder Soon",1)
-        if oq >= 1:    return ("Watch",       2)
-        return ("OK", 3)
-
-    pool[["_ps","_psort"]] = pd.DataFrame(pool.apply(_pstatus, axis=1).tolist(), index=pool.index)
-    pool["Wks_Cover_fmt"] = pool["Wks_Cover"].apply(
-        lambda x: "—" if pd.isna(x) or x > 50 else f"{x:.1f} wks")
-    pool = pool.sort_values(["_psort","Order_Qty"], ascending=[True,False])
-
-    p_urg = (pool["_psort"]==0).sum(); p_re = (pool["_psort"]==1).sum()
-    p_wa  = (pool["_psort"]==2).sum(); p_u  = int(pool["Order_Qty"].sum())
-
-    STATUS_EMOJI = {"Urgent":"🔴 Urgent","Reorder Soon":"🟡 Reorder Soon","Watch":"⚠️ Watch","OK":"🟢 OK"}
-    pool["Status"] = pool["_ps"].map(STATUS_EMOJI)
-
-    st.markdown("### 🏭 Supplier Order Summary")
-    st.caption("All stores as one pool. **Order Qty = buy from supplier.**")
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    k1,k2,k3,k4 = st.columns(4)
-    for col, val, lbl, clr in [
-        (k1, f"🔴 {p_urg}", "Urgent",          "#dc2626"),
-        (k2, f"🟡 {p_re}",  "Reorder Soon",    "#d97706"),
-        (k3, f"⚠️ {p_wa}",  "Watch",           "#f97316"),
-        (k4, f"{p_u:,}",    "Units to Buy",    "#1d4ed8"),
-    ]:
-        with col:
-            st.markdown(f'<div class="kpi-box"><p class="kpi-val" style="color:{clr}">{val}</p>'
-                        f'<p class="kpi-lbl">{lbl}</p></div>', unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # Category table
-    cp = pool.groupby("Category").agg(
-        Sub_cats=("Sub Category","nunique"), Stores=("Stores","max"),
-        Total_Stock=("Total_Stock","sum"), Free_Stock=("Total_Free","sum"),
-        Weekly_Rate=("Total_Rate","sum"), Order_Qty=("Order_Qty","sum"),
-    ).reset_index()
-    cp["Weeks Cover"] = (cp["Free_Stock"]/(cp["Weekly_Rate"]/7).replace(0,float("nan"))/7
-                         ).round(1).apply(lambda x: "—" if pd.isna(x) or x>50 else f"{x:.1f} wks")
-    cp["Status"] = cp["Order_Qty"].apply(lambda q: "🟡 Reorder" if q>=5 else ("⚠️ Watch" if q>=1 else "🟢 OK"))
-    cp["_s"]     = cp["Order_Qty"].apply(lambda q: 0 if q>=5 else (1 if q>=1 else 2))
-    cp = cp.sort_values(["_s","Order_Qty"], ascending=[True,False]).drop(columns=["_s"])
-    cp["Weekly_Rate"] = cp["Weekly_Rate"].round(1)
-    cp = cp.rename(columns={"Total_Stock":"Total Stock","Free_Stock":"Free Stock",
-                             "Weekly_Rate":"Weekly Rate","Order_Qty":"Order Qty"})
-    st.dataframe(cp[["Status","Category","Sub_cats","Stores","Total Stock",
-                      "Free Stock","Weekly Rate","Weeks Cover","Order Qty"]],
-                 use_container_width=True, hide_index=True)
-
-    sd = pool[["Status","Category","Sub Category","Stores",
-               "Total_Stock","Total_Free","Total_Rate","Wks_Cover_fmt","Target","Order_Qty"]
-              ].copy().rename(columns={
-        "Sub Category":"Sub-cat","Total_Stock":"Total Stock","Total_Free":"Free Stock",
-        "Total_Rate":"Weekly Rate","Wks_Cover_fmt":"Weeks Cover",
-        "Target":"Target Stock","Order_Qty":"Order Qty"})
-    sd["Weekly Rate"] = sd["Weekly Rate"].round(1)
-    st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown("**By Sub-Category (pooled)**")
-    st.dataframe(sd[["Status","Category","Sub-cat","Stores","Total Stock",
-                     "Free Stock","Weekly Rate","Weeks Cover","Target Stock","Order Qty"]],
-                 use_container_width=True, hide_index=True)
-
-    st.info("💡 **Order Qty = 0** = total chain stock meets target. "
-            "See **📍 By Location** for stores that still need stock moved.")
-
-    out_s = BytesIO(); sd.to_excel(out_s, index=False, engine="openpyxl"); out_s.seek(0)
-    st.download_button("⬇️ Download Supplier Order", data=out_s,
-        file_name=f"supplier_order_{sel_brand}_{today.strftime('%Y%m%d')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-    # ── Sold-Out & Missing-Size Alert ─────────────────────────────────────────
-    st.markdown("---")
-    st.markdown("### 🚨 Sold-Out & Missing Sizes")
-    st.caption(
-        f"**{sel_brand}** products filtered by SKU prefix. "
-        "Shows styles where all (or most) sizes are gone — "
-        "even when the category pool says Order Qty = 0."
-    )
-
-    if df_variants is None:
-        st.warning("⚠️ Variant stock file not found. "
-                   "Run `python fetch_variant_stock.py`, upload to Google Drive, "
-                   "set **GDRIVE_VARIANT_STOCK_ID**.")
-        return
-
-    vf = df_variants[df_variants["Brand"] == sel_brand].copy() if "Brand" in df_variants.columns else df_variants.copy()
-
-    if vf.empty:
-        st.info(f"No variants matched for brand **{sel_brand}**.")
-        return
-
-    ps = vf.groupby("Base Name").agg(
-        Total_Qty =("Qty","sum"),
-        Variants  =("Qty","count"),
-        Zero_Vars =("Qty", lambda x: (x<=0).sum()),
-        Sizes     =("Size",  lambda x: ", ".join(sorted(set(s for s in x if s)))),
-        Colors    =("Color", lambda x: ", ".join(sorted(set(c for c in x if c)))),
-    ).reset_index()
-
-    # Remove junk names: empty, short, code-only, shoe cm sizes
-    ps = ps[
-        (ps["Base Name"].str.len() > 5) &
-        (~ps["Base Name"].str.match(r"^[\d\-\s\.#\/]+$", na=False)) &  # pure codes
-        (~ps["Base Name"].str.contains(r"\d+\s*cm", case=False, na=False)) &
-        (ps["Base Name"].str.contains(r"[a-zA-Z]{3}", na=False)) &  # min 3 letters
-        (ps["Base Name"].str.contains(r" ", na=False))  # real names have spaces
-    ]
-
-    fully_out  = ps[(ps["Total_Qty"]<=0) & (ps["Zero_Vars"]==ps["Variants"])].copy()
-    partial_out = ps[
-        (ps["Total_Qty"] > 0) &
-        (ps["Zero_Vars"] >= ps["Variants"] * 0.5) &  # ≥50% sizes gone
-        (ps["Variants"] >= 3)                          # at least 3 variants (ignore 1-2 variant products)
-    ].copy()
-    partial_out = partial_out.sort_values("Zero_Vars", ascending=False)
-
-    # Category filter
-    if sel_cat != "All" and df_prod is not None:
-        cat_names = set(df_prod[(df_prod["Brand"]==sel_brand) & (df_prod["Category"]==sel_cat)
-                                ]["Product Name"].str.strip().str.lower())
-        fully_out   = fully_out[fully_out["Base Name"].str.lower().isin(cat_names)]
-        partial_out = partial_out[partial_out["Base Name"].str.lower().isin(cat_names)]
-
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown(f'<div class="kpi-box"><p class="kpi-val" style="color:#dc2626">{len(fully_out)}</p>'
-                    f'<p class="kpi-lbl">Styles fully sold out</p></div>', unsafe_allow_html=True)
-    with c2:
-        st.markdown(f'<div class="kpi-box"><p class="kpi-val" style="color:#d97706">{len(partial_out)}</p>'
-                    f'<p class="kpi-lbl">Styles with ≥50% sizes missing</p></div>', unsafe_allow_html=True)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    view_s = st.radio("Show", ["🔴 Fully Sold Out","⚠️ Missing Sizes","Both"], horizontal=True)
-
-    if view_s in ("🔴 Fully Sold Out","Both") and not fully_out.empty:
-        st.markdown(f"**🔴 Fully sold out ({len(fully_out)} styles)**")
-        st.dataframe(fully_out[["Base Name","Variants","Sizes","Colors","Total_Qty"]].rename(
-            columns={"Base Name":"Product","Total_Qty":"Stock"}),
-            use_container_width=True, hide_index=True)
-
-    if view_s in ("⚠️ Missing Sizes","Both") and not partial_out.empty:
-        st.markdown(f"**⚠️ Missing sizes ({len(partial_out)} styles — ≥50% variants gone)**")
-        partial_out["Missing"] = partial_out["Zero_Vars"].astype(str) + "/" + partial_out["Variants"].astype(str) + " sizes gone"
-        st.dataframe(partial_out[["Base Name","Missing","Sizes","Total_Qty"]].rename(
-            columns={"Base Name":"Product","Total_Qty":"Stock"}),
-            use_container_width=True, hide_index=True)
-
-    combined = pd.concat([
-        fully_out.assign(Alert="Fully Sold Out"),
-        partial_out.assign(Alert="Missing Sizes")
-    ], ignore_index=True)
-    out_so = BytesIO(); combined.to_excel(out_so, index=False, engine="openpyxl"); out_so.seek(0)
-    st.download_button("⬇️ Download Sold-Out & Missing Sizes", data=out_so,
-        file_name=f"sold_out_{sel_brand}_{today.strftime('%Y%m%d')}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-
-
 st.title("📦 Reorder Planner")
 src_badge = ('<span class="src-badge" style="background:#dcfce7;color:#166534">Real stock</span>'
               if USING_REAL_STOCK else
@@ -995,9 +751,278 @@ st.markdown("<br>", unsafe_allow_html=True)
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 tab1, tab2, tab3, tab4 = st.tabs(["📦 Overall Summary", "🔴 Urgent & Reorder", "📊 Full Plan", "📍 By Location"])
 
+# ── Tab 1: Overall Summary ────────────────────────────────────────────────────
 with tab1:
-    _show_overall()
+    qty_col_o = "Reorder Qty (Adj)" if show_display else "Reorder Qty"
 
+    # Pool all stores — treat as one shared warehouse
+    # Order Qty = max(0, total_target − total_free_stock)
+    pool = df_plan.groupby(["Category", "Sub Category"]).agg(
+        Stores           =("Location",    "nunique"),
+        Total_Stock      =("Est. Stock",  "sum"),
+        Total_Free       =("Free Stock",  "sum"),
+        Total_Rate       =("Weekly Rate", "sum"),
+    ).reset_index()
+
+    pool["Target"]     = (target_weeks * pool["Total_Rate"]).round()
+    pool["Order_Qty"]  = (pool["Target"] - pool["Total_Free"]).clip(lower=0).round().astype(int)
+    pool["Wks_Cover"]  = (
+        pool["Total_Free"] /
+        (pool["Total_Rate"] / 7).replace(0, float("nan")) / 7
+    ).round(1)
+
+    def pool_status(row):
+        wk = row["Wks_Cover"]
+        oq = row["Order_Qty"]
+        import math
+        if math.isnan(wk) or wk > target_weeks: return ("🟢 OK", 3)
+        if wk <= 1:                              return ("🔴 Urgent", 0)
+        if oq >= 5:                              return ("🟡 Reorder Soon", 1)
+        if oq >= 1:                              return ("⚠️ Watch", 2)
+        return ("🟢 OK", 3)
+
+    pool[["Status","_sort"]] = pd.DataFrame(
+        pool.apply(pool_status, axis=1).tolist(), index=pool.index
+    )
+    pool["Wks_Cover_fmt"] = pool["Wks_Cover"].apply(
+        lambda x: "—" if pd.isna(x) or x > 50 else f"{x:.1f} wks"
+    )
+    pool = pool.sort_values(["_sort","Order_Qty"], ascending=[True,False])
+
+    # KPIs
+    p_urgent  = (pool["_sort"] == 0).sum()
+    p_reorder = (pool["_sort"] == 1).sum()
+    p_watch   = (pool["_sort"] == 2).sum()
+    p_units   = int(pool["Order_Qty"].sum())
+
+    st.markdown("### 🏭 Supplier Order Summary")
+    st.caption(
+        "All stores treated as one shared pool. "
+        "**Order Qty = units to buy from supplier.** "
+        "For store-level gaps, see 📍 By Location."
+    )
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    k1, k2, k3, k4 = st.columns(4)
+    for col, val, lbl, clr in [
+        (k1, f"🔴 {p_urgent}",   "Urgent (pooled)",       "#dc2626"),
+        (k2, f"🟡 {p_reorder}",  "Reorder Soon (pooled)", "#d97706"),
+        (k3, f"⚠️ {p_watch}",    "Watch (pooled)",        "#f97316"),
+        (k4, f"{p_units:,}",     "Total Units to Buy",    "#1d4ed8"),
+    ]:
+        with col:
+            st.markdown(
+                f'<div class="kpi"><p class="kpi-val" style="color:{clr}">{val}</p>'
+                f'<p class="kpi-lbl">{lbl}</p></div>',
+                unsafe_allow_html=True,
+            )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # Category rollup
+    st.markdown("**By Category — total to buy from supplier**")
+    cat_pool = pool.groupby("Category").agg(
+        Sub_cats   =("Sub Category", "nunique"),
+        Stores     =("Stores",       "max"),
+        Total_Stock=("Total_Stock",  "sum"),
+        Free_Stock =("Total_Free",   "sum"),
+        Weekly_Rate=("Total_Rate",   "sum"),
+        Order_Qty  =("Order_Qty",    "sum"),
+    ).reset_index()
+    cat_pool["Weeks Cover"] = (
+        cat_pool["Free_Stock"] /
+        (cat_pool["Weekly_Rate"] / 7).replace(0, float("nan")) / 7
+    ).round(1).apply(lambda x: "—" if pd.isna(x) or x > 50 else f"{x:.1f} wks")
+    cat_pool["Status"] = cat_pool["Order_Qty"].apply(
+        lambda q: "🟡 Reorder" if q >= 5 else ("⚠️ Watch" if q >= 1 else "🟢 OK"))
+    cat_pool["_s"] = cat_pool["Order_Qty"].apply(lambda q: 0 if q >= 5 else (1 if q >= 1 else 2))
+    cat_pool = cat_pool.sort_values(["_s","Order_Qty"], ascending=[True,False]).drop(columns=["_s"])
+    cat_pool["Weekly_Rate"] = cat_pool["Weekly_Rate"].round(1)
+    cat_pool = cat_pool.rename(columns={
+        "Total_Stock":"Total Stock", "Free_Stock":"Free Stock",
+        "Weekly_Rate":"Weekly Rate", "Order_Qty":"Order Qty",
+    })
+    st.dataframe(
+        cat_pool[["Status","Category","Sub_cats","Stores","Total Stock",
+                  "Free Stock","Weekly Rate","Weeks Cover","Order Qty"]],
+        use_container_width=True, hide_index=True
+    )
+
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    # Sub-category detail
+    st.markdown("**By Sub-Category — detail (pooled)**")
+    sub_disp = pool[[
+        "Status","Category","Sub Category","Stores",
+        "Total_Stock","Total_Free","Total_Rate",
+        "Wks_Cover_fmt","Target","Order_Qty"
+    ]].copy().rename(columns={
+        "Sub Category":"Sub-cat",
+        "Total_Stock":"Total Stock",
+        "Total_Free":"Free Stock",
+        "Total_Rate":"Weekly Rate",
+        "Wks_Cover_fmt":"Weeks Cover",
+        "Target":"Target Stock",
+        "Order_Qty":"Order Qty",
+    })
+    sub_disp["Weekly Rate"] = sub_disp["Weekly Rate"].round(1)
+    st.dataframe(
+        sub_disp[["Status","Category","Sub-cat","Stores","Total Stock",
+                  "Free Stock","Weekly Rate","Weeks Cover","Target Stock","Order Qty"]],
+        use_container_width=True, hide_index=True
+    )
+
+    st.info(
+        "💡 **Order Qty = 0** for a category means total chain stock already meets "
+        "the target — but individual stores may still need stock moved. "
+        "See **📍 By Location** for distribution gaps."
+    )
+
+    # ── Sold-Out Products with Recent Sales ───────────────────────────────────
+    # Shows specific products that are completely out of stock (all variants = 0)
+    # but were selling recently — these are the real reorder candidates the
+    # category pool misses because old dead stock inflates category totals.
+    st.markdown("---")
+    st.markdown("### 🚨 Sold-Out Products with Recent Sales")
+    st.caption(
+        "These specific products are completely sold out (every size/color = 0 stock) "
+        "but had recent POS sales — meaning customers wanted them. "
+        "The category pool shows Order Qty = 0 because other old styles still have stock, "
+        "but **these specific styles need to be reordered.**"
+    )
+
+    if df_variants is not None:
+        # Filter to selected brand products from the product export
+        # Use df_prod (which has Brand column) to get product names for this brand
+        brand_products = df_prod[df_prod["Brand"] == sel_brand]["Product Name"].str.strip().unique()
+
+        # Aggregate variant stock by base product name
+        v = df_variants.copy()
+        prod_stock = v.groupby("Base Name").agg(
+            Total_Qty   =("Qty", "sum"),
+            Variants    =("Qty", "count"),
+            Zero_Vars   =("Qty", lambda x: (x <= 0).sum()),
+        ).reset_index()
+
+        # Completely sold out = all variants are zero or negative
+        sold_out_all = prod_stock[
+            (prod_stock["Total_Qty"] <= 0) &
+            (prod_stock["Zero_Vars"] == prod_stock["Variants"])
+        ]["Base Name"].tolist()
+
+        # Cross with brand products to filter to selected brand
+        # Match by checking if the product name is close to something in brand_products
+        # Use simple contains matching since names may differ slightly
+        sold_out_brand = []
+        brand_prod_set = set(p.lower() for p in brand_products)
+        for name in sold_out_all:
+            # Direct match
+            if name.lower() in brand_prod_set:
+                sold_out_brand.append(name)
+            # Fuzzy: check if any brand product contains this name or vice versa
+            elif any(name.lower() in bp or bp in name.lower()
+                     for bp in brand_prod_set if len(name) > 5):
+                sold_out_brand.append(name)
+
+        if not sold_out_brand:
+            # Fall back to all sold-out products if brand match yields nothing
+            sold_out_brand = sold_out_all[:50]
+
+        if sold_out_brand:
+            # Get the variant detail for sold-out products
+            sold_detail = v[v["Base Name"].isin(sold_out_brand)].copy()
+
+            # Build size breakdown per product
+            def get_sizes(name, df):
+                subs = df[df["Base Name"] == name]
+                # Try to extract size from SKU (format: XXXXX-Color-Size)
+                sizes = []
+                for _, row in subs.iterrows():
+                    sku = str(row.get("SKU", ""))
+                    parts = sku.split("-")
+                    last = parts[-1].upper() if parts else ""
+                    SIZE_SET = {"XS","S","M","L","XL","XXL","2XL","3XL",
+                                "36","37","38","39","40","41","42","43","44"}
+                    if last in SIZE_SET:
+                        sizes.append(last)
+                return ", ".join(sorted(set(sizes))) if sizes else "—"
+
+            # Deduplicate and build display table
+            seen = set()
+            rows_out = []
+            for name in sold_out_brand:
+                if name in seen: continue
+                seen.add(name)
+                sub = prod_stock[prod_stock["Base Name"] == name].iloc[0]
+                sizes = get_sizes(name, v)
+                rows_out.append({
+                    "Product Name":  name,
+                    "Variants":      int(sub["Variants"]),
+                    "Sizes":         sizes,
+                    "Total Qty":     int(sub["Total_Qty"]),
+                })
+
+            # Apply category filter if set
+            if sel_cat != "All" and df_prod is not None:
+                cat_prods = df_prod[
+                    (df_prod["Brand"] == sel_brand) &
+                    (df_prod["Category"] == sel_cat)
+                ]["Product Name"].str.strip().str.lower().tolist()
+                rows_out = [r for r in rows_out
+                            if any(cp in r["Product Name"].lower() or
+                                   r["Product Name"].lower() in cp
+                                   for cp in cat_prods)]
+
+            if rows_out:
+                df_out = pd.DataFrame(rows_out).sort_values("Product Name")
+
+                # KPI
+                col_kpi1, col_kpi2 = st.columns(2)
+                with col_kpi1:
+                    st.markdown(
+                        f'<div class="kpi-box">'                        f'<p class="kpi-val" style="color:#dc2626">{len(df_out)}</p>'                        f'<p class="kpi-lbl">Styles completely sold out</p></div>',
+                        unsafe_allow_html=True
+                    )
+                with col_kpi2:
+                    st.markdown(
+                        f'<div class="kpi-box">'                        f'<p class="kpi-val" style="color:#d97706">{df_out["Variants"].sum()}</p>'                        f'<p class="kpi-lbl">SKUs (size/color combinations) at zero</p></div>',
+                        unsafe_allow_html=True
+                    )
+                st.markdown("<br>", unsafe_allow_html=True)
+                st.dataframe(df_out, use_container_width=True, hide_index=True)
+
+                # Download
+                out_so = BytesIO()
+                df_out.to_excel(out_so, index=False, engine="openpyxl")
+                out_so.seek(0)
+                st.download_button(
+                    "⬇️ Download Sold-Out List",
+                    data=out_so,
+                    file_name=f"sold_out_{sel_brand}_{today.strftime('%Y%m%d')}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
+            else:
+                st.success(f"✅ No completely sold-out products found for {sel_brand} / {sel_cat}.")
+        else:
+            st.success(f"✅ No completely sold-out products found for {sel_brand}.")
+    else:
+        st.warning(
+            "⚠️ Variant stock file not loaded. Upload **Product_Variant__product_product_.xlsx** "
+            "from Odoo (Products → Export → select Barcode, Internal Reference, Name, Qty On Hand) "
+            "to Google Drive and set **GDRIVE_VARIANT_STOCK_ID** at the top of this file."
+        )
+
+    out_pool = BytesIO()
+    sub_disp.to_excel(out_pool, index=False, engine="openpyxl")
+    out_pool.seek(0)
+    st.download_button(
+        "⬇️ Download Supplier Order as Excel",
+        data=out_pool,
+        file_name=f"supplier_order_{sel_brand}_{today.strftime('%Y%m%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+# ── Tab 2: Urgent & Reorder ───────────────────────────────────────────────────
 with tab2:
     # When display stock is on, show adjusted urgent list as primary
     if show_display:
