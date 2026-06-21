@@ -334,9 +334,19 @@ with st.sidebar:
                 ["All"] + sub_cats,
                 help=f"Sub-types within {sel_cat}")
 
-    season_options = ["All", "Summer", "Winter", "All-Season"]
-    sel_season = st.selectbox("Filter by season", season_options, index=0,
-        help=f"Current season: {CURRENT_SEASON}.")
+    SEASON_OPTIONS = ["All", "Summer (+ All-Season)", "Winter (+ All-Season)", "All-Season only"]
+    sel_season_raw = st.selectbox(
+        "Season",
+        SEASON_OPTIONS,
+        index=1,  # default to Summer
+        help="Summer and Winter both include All-Season items (Denim, Leggings etc.)"
+    )
+    sel_season = {
+        "All":                      "All",
+        "Summer (+ All-Season)":    "Summer",
+        "Winter (+ All-Season)":    "Winter",
+        "All-Season only":          "All-Season",
+    }[sel_season_raw]
 
     # ── Display stock settings ─────────────────────────────────────────────────
     st.markdown("---")
@@ -623,8 +633,12 @@ if sel_cat != "All":
     df_plan = df_plan[df_plan["Category"] == sel_cat]
 if sel_sub_cat != "All":
     df_plan = df_plan[df_plan["Sub Category"] == sel_sub_cat]
+# Season filter: Summer/Winter includes All-Season items (Denim, Leggings — year-round)
 if sel_season != "All":
-    df_plan = df_plan[df_plan["Season"] == sel_season]
+    df_plan = df_plan[
+        (df_plan["Season"] == sel_season) |
+        (df_plan["Season"] == "All-Season")
+    ]
 
 df_plan = df_plan.sort_values(["_urgency_key","Reorder Qty"], ascending=[True,False])
 
