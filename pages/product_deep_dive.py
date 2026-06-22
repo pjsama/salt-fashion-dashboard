@@ -148,6 +148,29 @@ def fmt_npr(v):
     if v >= 1_000:     return f"NPR {v/1_000:.0f}K"
     return f"NPR {v:,.0f}"
 
+# ── Styler functions — module-level so they're always in scope ────────────────
+def style_status(val):
+    colors = {"Super Fast": "background-color:#1B5E20;color:white",
+              "Fast":        "background-color:#43A047;color:white",
+              "Medium":      "background-color:#F9A825;color:black",
+              "Slow":        "background-color:#E53935;color:white",
+              "Dead":        "background-color:#424242;color:white"}
+    return colors.get(val, "")
+
+def style_reorder(val):
+    if isinstance(val, (int, float)) and val > 0:
+        return "background-color:#dcfce7;color:#166534;font-weight:700"
+    return ""
+
+def style_str_status(val):
+    return style_status(val)
+
+def style_doc(val):
+    colors = {"Reorder Now": "background-color:#B71C1C;color:white",
+              "Watch":        "background-color:#F57F17;color:white",
+              "OK":           "background-color:#2E7D32;color:white"}
+    return colors.get(val, "")
+
 def str_badge(status):
     cls = {"Super Fast":"sf","Fast":"fa","Medium":"me","Slow":"sl","Dead":"de"}.get(status,"de")
     return f'<span class="{cls}">{status}</span>'
@@ -193,7 +216,13 @@ with st.sidebar:
 
     # Product search
     products = sorted(prod_list_df["Product Name"].unique())
-    products = [p for p in products if p and len(p) > 3]
+    import re as _re
+    products = [p for p in products
+                if p and len(p) > 5                              # min length
+                and _re.search(r"[a-zA-Z]{3}", p)               # at least 3 letters
+                and " " in p                                      # real names have spaces
+                and not _re.match(r"^[\d\-\.\s]+$", p)       # not pure numbers/codes
+                and not _re.search(r"\d+\s*cm", p, _re.I)]     # not shoe sizes like "37 cm"
 
     search = st.text_input("Search product", placeholder="Type to filter…")
     if search.strip():
@@ -308,18 +337,7 @@ if not p_sizes.empty:
     p_sizes["Suggest Reorder"] = p_sizes["Suggest Reorder"].astype(int)
 
     # Color-code the status column
-    def style_status(val):
-        colors = {"Super Fast":"background-color:#1B5E20;color:white",
-                  "Fast":"background-color:#43A047;color:white",
-                  "Medium":"background-color:#F9A825;color:black",
-                  "Slow":"background-color:#E53935;color:white",
-                  "Dead":"background-color:#424242;color:white"}
-        return colors.get(val,"")
-
-    def style_reorder(val):
-        if isinstance(val, (int,float)) and val > 0:
-            return "background-color:#dcfce7;color:#166534;font-weight:700"
-        return ""
+    # (style_status and style_reorder defined at module level)
 
     display_sizes = p_sizes[["Size","Units Sold","In Stock","STR %","Status","Suggest Reorder"]].copy()
     display_sizes["STR %"] = display_sizes["STR %"].round(1)
@@ -345,7 +363,7 @@ if not p_sizes.empty:
             insight_parts.append(f"🔴 <strong>Stuck sizes: {', '.join(dead_sizes)}</strong> — these aren't selling, hold off")
         if total_suggest_size > 0:
             insight_parts.append(f"📦 <strong>Total suggested reorder from sizes: {total_suggest_size} units</strong>")
-        st.info("  ·  ".join(insight_parts))
+        st.markdown('<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px 14px;font-size:13px;color:#1e40af;margin-top:8px">' + "  &nbsp;·&nbsp;  ".join(insight_parts) + "</div>", unsafe_allow_html=True)
 else:
     st.info("Size breakdown not available — variant_analysis.xlsx needed. Run `python variant_export.py`.")
 
@@ -378,7 +396,7 @@ if not p_colors.empty:
         parts = []
         if fast_colors: parts.append(f"🟢 <strong>Top colors: {', '.join(fast_colors[:4])}</strong>")
         if dead_colors: parts.append(f"🔴 <strong>Not moving: {', '.join(dead_colors[:4])}</strong>")
-        st.info("  ·  ".join(parts))
+        st.markdown('<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px 14px;font-size:13px;color:#1e40af;margin-top:8px">' + "  &nbsp;·&nbsp;  ".join(parts) + "</div>", unsafe_allow_html=True)
 else:
     st.info("Color breakdown not available — variant_analysis.xlsx needed.")
 
@@ -428,18 +446,7 @@ if not prod_rows.empty:
             lambda s: SIZE_ORDER.index(s) if s in SIZE_ORDER else 99)
         sku_display = sku_display.sort_values(["Color","_sk"]).drop(columns=["_sk"])
 
-    def style_str_status(val):
-        colors = {"Super Fast":"background-color:#1B5E20;color:white",
-                  "Fast":"background-color:#43A047;color:white",
-                  "Medium":"background-color:#F9A825;color:black",
-                  "Slow":"background-color:#E53935;color:white",
-                  "Dead":"background-color:#424242;color:white"}
-        return colors.get(val,"")
-    def style_doc(val):
-        colors = {"Reorder Now":"background-color:#B71C1C;color:white",
-                  "Watch":"background-color:#F57F17;color:white",
-                  "OK":"background-color:#2E7D32;color:white"}
-        return colors.get(val,"")
+    # (style_str_status and style_doc defined at module level)
 
     fmt_dict = {}
     if "Sell-Through %" in sku_display.columns: fmt_dict["Sell-Through %"] = "{:.1f}%"
