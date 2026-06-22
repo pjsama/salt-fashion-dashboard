@@ -263,7 +263,20 @@ p_sizes  = size_df[size_df["Product Name"] == sel_product].copy()  if size_df  i
 p_colors = color_df[color_df["Product Name"] == sel_product].copy() if color_df is not None else pd.DataFrame()
 
 # Store data for this product
-p_stores = df_store[df_store["Product"] == sel_product].copy() if df_store is not None else pd.DataFrame()
+# Try exact match first, then fuzzy (store names may differ slightly)
+if df_store is not None and "Product" in df_store.columns:
+    p_stores = df_store[df_store["Product"] == sel_product].copy()
+    if p_stores.empty:
+        # Fuzzy: product name contains search term or vice versa
+        sel_lower = sel_product.lower()
+        mask = df_store["Product"].str.lower().apply(
+            lambda n: sel_lower in n or n in sel_lower or
+            # Word-overlap: at least 3 words match
+            len(set(sel_lower.split()) & set(n.split())) >= min(3, len(sel_lower.split()))
+        )
+        p_stores = df_store[mask].copy()
+else:
+    p_stores = pd.DataFrame()
 
 # ── Reorder verdict ───────────────────────────────────────────────────────────
 weekly_rate = total_sold / 52 if total_sold > 0 else 0  # rough all-time weekly rate
@@ -365,7 +378,10 @@ if not p_sizes.empty:
             insight_parts.append(f"📦 <strong>Total suggested reorder from sizes: {total_suggest_size} units</strong>")
         st.markdown('<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px 14px;font-size:13px;color:#1e40af;margin-top:8px">' + "  &nbsp;·&nbsp;  ".join(insight_parts) + "</div>", unsafe_allow_html=True)
 else:
-    st.info("Size breakdown not available — variant_analysis.xlsx needed. Run `python variant_export.py`.")
+    if size_df is not None:
+        st.info(f"No size variants found for **{sel_product}** — this product may have no size attribute set in Odoo.")
+    else:
+        st.info("Size breakdown not available — variant_analysis.xlsx needed. Run `python variant_export.py`.")
 
 # ── Color breakdown ───────────────────────────────────────────────────────────
 st.markdown('<div class="sec">🎨 Color Performance — which colors customers want vs which are sitting</div>', unsafe_allow_html=True)
@@ -398,7 +414,10 @@ if not p_colors.empty:
         if dead_colors: parts.append(f"🔴 <strong>Not moving: {', '.join(dead_colors[:4])}</strong>")
         st.markdown('<div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:10px 14px;font-size:13px;color:#1e40af;margin-top:8px">' + "  &nbsp;·&nbsp;  ".join(parts) + "</div>", unsafe_allow_html=True)
 else:
-    st.info("Color breakdown not available — variant_analysis.xlsx needed.")
+    if color_df is not None:
+        st.info(f"No color variants found for **{sel_product}** — this product comes in sizes only, or color attribute isn't set in Odoo.")
+    else:
+        st.info("Color breakdown not available — variant_analysis.xlsx needed. Run `python variant_export.py`.")
 
 # ── Store performance ─────────────────────────────────────────────────────────
 st.markdown('<div class="sec">🏪 Store Performance — where this product sells most</div>', unsafe_allow_html=True)
@@ -428,7 +447,14 @@ if not p_stores.empty:
                 unsafe_allow_html=True
             )
 else:
-    st.info("Store breakdown not available — store_analysis.xlsx needed.")
+    if df_store is not None:
+        st.info(
+            f"**{sel_product}** doesn't appear in the top 20 products at any store. "
+            "It may be a newer or lower-volume product. "
+            "Store-level data is only tracked for the top 20 sellers per store."
+        )
+    else:
+        st.info("Store breakdown not available — store_analysis.xlsx not loaded. Check Google Drive connection.")
 
 # ── Size × Color full grid (from odoo_products.xlsx rows) ────────────────────
 st.markdown('<div class="sec">📋 Full SKU Breakdown — every size × color combination</div>', unsafe_allow_html=True)
