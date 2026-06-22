@@ -37,10 +37,11 @@ SIZE_ORDER = ["XS","S","M","L","XL","2XL","3XL","4XL",
 
 # ── Name cleaners ─────────────────────────────────────────────────────────────
 def clean_name(name):
-    """Strip [SKU] prefix, newlines, tabs, extra spaces."""
+    """Strip [SKU] prefix, quotes, newlines, tabs, extra spaces."""
     name = str(name).strip()
     name = re.sub(r"^\[[^\]]+\]\s*", "", name)   # strip [SKU] prefix
     name = name.replace("\n", " ").replace("\t", " ")
+    name = re.sub(r'^"+|"+$', "", name)              # strip surrounding quotes
     name = re.sub(r"\s+", " ", name).strip()
     return name
 
@@ -99,18 +100,22 @@ def _gdrive(file_id):
         buf.seek(0); return buf
     except: return None
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_resource(show_spinner=False)
 def load_products():
     buf = _gdrive(GDRIVE_MAIN_ID)
     df = None
+    # Skip Image_Base64 and Image columns — they add 85MB and 17s to load time
+    _skip_cols = lambda c: c not in ("Image_Base64", "Image")
     if buf:
-        try: df = pd.read_excel(buf, sheet_name="Products", engine="openpyxl")
+        try: df = pd.read_excel(buf, sheet_name="Products", engine="openpyxl", usecols=_skip_cols)
         except: pass
     if df is None:
         base = r"C:\Users\Legion\Desktop\odoo_export"
         for d in [base+r"\exports", base]:
             files = sorted(Path(d).glob("odoo_products*.xlsx"), reverse=True) if Path(d).exists() else []
-            if files: df = pd.read_excel(files[0], sheet_name="Products", engine="openpyxl"); break
+            if files:
+                df = pd.read_excel(files[0], sheet_name="Products", engine="openpyxl", usecols=_skip_cols)
+                break
     if df is None: return None
     df.columns = [c.strip() for c in df.columns]
     df["Product Name"] = df["Product Name"].fillna("").astype(str).apply(clean_name)
@@ -129,7 +134,7 @@ def load_products():
         df["Template_ID"] = pd.to_numeric(df["Template_ID"], errors="coerce")
     return df
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_resource(show_spinner=False)
 def load_variants():
     buf = _gdrive(GDRIVE_VARIANT_ID)
     size_df = color_df = None
@@ -157,7 +162,7 @@ def load_variants():
                 df[col] = df[col].fillna("").astype(str).str.replace(r"^(Size|Color|Brand):\s*","",regex=True).str.strip()
     return size_df, color_df
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_resource(show_spinner=False)
 def load_store():
     buf = _gdrive(GDRIVE_STORE_ID)
     df = None
@@ -182,10 +187,18 @@ def load_store():
     return df
 
 # ── Data loading ──────────────────────────────────────────────────────────────
-with st.spinner("Loading data…"):
-    df_raw    = load_products()
-    size_df, color_df = load_variants()
-    df_store  = load_store()
+# Show loading messages — products file takes ~5s even optimised
+_load_container = st.empty()
+with _load_container.container():
+    with st.spinner("Loading product catalog (first load may take ~10s)…"):
+        df_raw = load_products()
+with _load_container.container():
+    with st.spinner("Loading variant analysis…"):
+        size_df, color_df = load_variants()
+with _load_container.container():
+    with st.spinner("Loading store data…"):
+        df_store = load_store()
+_load_container.empty()
 
 if df_raw is None:
     st.error("Could not load product data."); st.stop()
@@ -271,7 +284,7 @@ with st.sidebar:
     st.markdown("---")
     st.caption(f"{len(products):,} products · {len(filtered_df):,} total in category")
     if st.button("🔄 Refresh", use_container_width=True):
-        st.cache_data.clear(); st.rerun()
+        st.cache_resource.clear(); st.rerun()
 
 # ── Get template row for selected product ─────────────────────────────────────
 prod_row = filtered_df[filtered_df["Product_Name"] == sel_product]
