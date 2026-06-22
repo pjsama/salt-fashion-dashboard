@@ -211,7 +211,7 @@ with st.sidebar:
     st.markdown("---")
 
     st.caption(f"{len(products)} products shown")
-    if st.button("🔄 Refresh data", use_container_width=True):
+    if st.button("🔄 Refresh data", width='stretch'):
         st.cache_data.clear(); st.rerun()
 
 # ── Pull data for selected product ───────────────────────────────────────────
@@ -325,12 +325,12 @@ if not p_sizes.empty:
     display_sizes["STR %"] = display_sizes["STR %"].round(1)
 
     styled = display_sizes.style\
-        .applymap(style_status, subset=["Status"])\
-        .applymap(style_reorder, subset=["Suggest Reorder"])\
+        .map(style_status, subset=["Status"])\
+        .map(style_reorder, subset=["Suggest Reorder"])\
         .format({"STR %": "{:.1f}%", "Units Sold": "{:,.0f}",
                  "In Stock": "{:,.0f}", "Suggest Reorder": "{:,.0f}"})
 
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+    st.dataframe(styled, width='stretch', hide_index=True)
 
     # Insight callout
     dead_sizes = p_sizes[p_sizes["Status"].isin(["Dead","Slow"])]["Size"].tolist()
@@ -363,12 +363,12 @@ if not p_colors.empty:
     display_colors["STR %"] = display_colors["STR %"].round(1)
 
     styled_c = display_colors.style\
-        .applymap(style_status, subset=["Status"])\
-        .applymap(style_reorder, subset=["Suggest Reorder"])\
+        .map(style_status, subset=["Status"])\
+        .map(style_reorder, subset=["Suggest Reorder"])\
         .format({"STR %": "{:.1f}%", "Units Sold": "{:,.0f}",
                  "In Stock": "{:,.0f}", "Suggest Reorder": "{:,.0f}"})
 
-    st.dataframe(styled_c, use_container_width=True, hide_index=True)
+    st.dataframe(styled_c, width='stretch', hide_index=True)
 
     top_color    = p_colors.iloc[0]["Color"] if len(p_colors) > 0 else "—"
     dead_colors  = p_colors[p_colors["Status"].isin(["Dead","Slow"])]["Color"].tolist()
@@ -392,7 +392,7 @@ if not p_stores.empty:
 
     col_s, col_chart = st.columns([2,3])
     with col_s:
-        st.dataframe(p_stores_display, use_container_width=True, hide_index=True)
+        st.dataframe(p_stores_display, width='stretch', hide_index=True)
 
     with col_chart:
         # Simple horizontal bar via metric cards
@@ -451,10 +451,10 @@ if not prod_rows.empty:
     doc_cols   = [c for c in ["DOC Status"] if c in sku_display.columns]
 
     styled_sku = sku_display.style.format(fmt_dict)
-    if apply_cols: styled_sku = styled_sku.applymap(style_str_status, subset=apply_cols)
-    if doc_cols:   styled_sku = styled_sku.applymap(style_doc,        subset=doc_cols)
+    if apply_cols: styled_sku = styled_sku.map(style_str_status, subset=apply_cols)
+    if doc_cols:   styled_sku = styled_sku.map(style_doc,        subset=doc_cols)
 
-    st.dataframe(styled_sku, use_container_width=True, hide_index=True)
+    st.dataframe(styled_sku, width='stretch', hide_index=True)
 
 # ── Similar products in same category ────────────────────────────────────────
 st.markdown('<div class="sec">📊 How this product compares — similar products in same category</div>', unsafe_allow_html=True)
@@ -495,9 +495,9 @@ if not cat_peers.empty:
 
     styled_peers = combined.style\
         .apply(highlight_current, axis=1)\
-        .applymap(style_status, subset=["Status"])\
+        .map(style_status, subset=["Status"])\
         .format({"STR %": "{:.1f}%", "Units Sold": "{:,.0f}", "In Stock": "{:,.0f}"})
-    st.dataframe(styled_peers, use_container_width=True, hide_index=True)
+    st.dataframe(styled_peers, width='stretch', hide_index=True)
     rank = (cat_peers["Total_Sold"] > total_sold).sum() + 1
     st.caption(f"Ranked #{rank} by units sold within {category} ({sel_brand})")
 

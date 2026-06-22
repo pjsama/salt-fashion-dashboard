@@ -294,20 +294,52 @@ def sku_to_brand(sku):
     return ""
 
 def parse_variant_name(name):
-    """Extract (base_name, color, size) from 'Product Name - Color/Size'."""
+    """Parse Odoo variant display_name into (base_name, color, size).
+    Handles formats:
+      - '[SA-0114Red-XS] Fiery Red Dress'  (display_name with [SKU] prefix)
+      - '[WA-G240917-G07-White-S] Wide Dress'
+      - 'Product Name - Color/Size'
+      - 'Product Name/Color'
+    """
+    import re as _re
     SIZE_SET = {"XS","S","M","L","XL","XXL","2XL","3XL","4XL",
                 "36","37","38","39","40","41","42","43","44","ONE SIZE","FREE SIZE"}
     name = str(name).strip().strip("\n").strip()
+    sku_in_name = ""
     size = ""; color = ""
+
+    # Strip [SKU] prefix — e.g. "[SA-0114Red-XS] Product Name"
+    m = _re.match(r"^\[([^\]]+)\]\s*", name)
+    if m:
+        sku_in_name = m.group(1)
+        name = name[m.end():].strip()
+
+    # "/Size" suffix — e.g. "Product Name/XS"
     if "/" in name:
         parts = name.rsplit("/", 1)
         pot = parts[1].strip().upper()
         if pot in SIZE_SET:
             size = pot; name = parts[0].strip()
+
+    # " - Color" suffix — e.g. "Product Name - Apricot"
     if " - " in name:
         parts = name.rsplit(" - ", 1)
         color = parts[1].strip(); name = parts[0].strip()
-    return name, color, size
+
+    # Fallback: extract size/color from the [SKU] part if still missing
+    # e.g. "SA-0114Red-XS" → size=XS, color=Red (rough)
+    if sku_in_name and not size:
+        sp = sku_in_name.split("-")
+        last = sp[-1].strip().upper()
+        if last in SIZE_SET:
+            size = last
+            # Color is the part before the size suffix
+            if len(sp) >= 2:
+                raw_color = sp[-2].strip()
+                # Remove leading digits (SA-0113Khaki → Khaki)
+                color = _re.sub(r"^\d+", "", raw_color).strip() or raw_color
+
+    return name.strip(), color, size
 
 @st.cache_data(ttl=600, show_spinner=False)
 def load_variant_stock():
@@ -410,9 +442,16 @@ with st.sidebar:
                 ["All"] + sub_cats,
                 help=f"Sub-types within {sel_cat}")
 
-    season_options = ["All", "Summer", "Winter", "All-Season"]
-    sel_season = st.selectbox("Filter by season", season_options, index=0,
-        help=f"Current season: {CURRENT_SEASON}.")
+    SEASON_OPTIONS = ["All", "Summer (+ All-Season)", "Winter (+ All-Season)", "All-Season only"]
+    sel_season_raw = st.selectbox(
+        "Season", SEASON_OPTIONS, index=1,
+        help="Summer and Winter both include All-Season items (Denim, Leggings etc.)")
+    sel_season = {
+        "All":                     "All",
+        "Summer (+ All-Season)":   "Summer",
+        "Winter (+ All-Season)":   "Winter",
+        "All-Season only":         "All-Season",
+    }[sel_season_raw]
 
     # ── Display stock settings ─────────────────────────────────────────────────
     st.markdown("---")
@@ -487,7 +526,7 @@ with st.sidebar:
         msg += "Run `python fetch_recent_category_sales.py --brand SALT` and set GDRIVE_RECENTCAT_ID."
         st.warning(msg)
 
-    if st.button("🔄 Refresh", use_container_width=True):
+    if st.button("🔄 Refresh", width='stretch'):
         st.cache_data.clear(); st.rerun()
 
 # ── Calculate weekly sell rates from POS data ─────────────────────────────────
@@ -700,7 +739,10 @@ if sel_cat != "All":
 if sel_sub_cat != "All":
     df_plan = df_plan[df_plan["Sub Category"] == sel_sub_cat]
 if sel_season != "All":
-    df_plan = df_plan[df_plan["Season"] == sel_season]
+    df_plan = df_plan[
+        (df_plan["Season"] == sel_season) |
+        (df_plan["Season"] == "All-Season")
+    ]
 
 df_plan = df_plan.sort_values(["_urgency_key","Reorder Qty"], ascending=[True,False])
 
@@ -774,7 +816,7 @@ def _show_overall():
                              "Weekly_Rate":"Weekly Rate","Order_Qty":"Order Qty"})
     st.dataframe(cp[["Status","Category","Sub_cats","Stores","Total Stock",
                       "Free Stock","Weekly Rate","Weeks Cover","Order Qty"]],
-                 use_container_width=True, hide_index=True)
+                 width='stretch', hide_index=True)
 
     sd = pool[["Status","Category","Sub Category","Stores",
                "Total_Stock","Total_Free","Total_Rate","Wks_Cover_fmt","Target","Order_Qty"]
@@ -787,7 +829,7 @@ def _show_overall():
     st.markdown("**By Sub-Category (pooled)**")
     st.dataframe(sd[["Status","Category","Sub-cat","Stores","Total Stock",
                      "Free Stock","Weekly Rate","Weeks Cover","Target Stock","Order Qty"]],
-                 use_container_width=True, hide_index=True)
+                 width='stretch', hide_index=True)
 
     st.info("💡 **Order Qty = 0** = total chain stock meets target. "
             "See **📍 By Location** for stores that still need stock moved.")
@@ -826,12 +868,21 @@ def _show_overall():
         Colors    =("Color", lambda x: ", ".join(sorted(set(c for c in x if c)))),
     ).reset_index()
 
-    # Remove junk names
-    ps = ps[(ps["Base Name"].str.len() > 4) &
-            (~ps["Base Name"].str.match(r"^[0-9\- ]+$", na=False))]
+    # Remove junk names: empty, short, code-only, shoe cm sizes
+    ps = ps[
+        (ps["Base Name"].str.len() > 5) &
+        (~ps["Base Name"].str.match(r"^[\d\-\s\.#\/]+$", na=False)) &  # pure codes
+        (~ps["Base Name"].str.contains(r"\d+\s*cm", case=False, na=False)) &
+        (ps["Base Name"].str.contains(r"[a-zA-Z]{3}", na=False)) &  # min 3 letters
+        (ps["Base Name"].str.contains(r" ", na=False))  # real names have spaces
+    ]
 
     fully_out  = ps[(ps["Total_Qty"]<=0) & (ps["Zero_Vars"]==ps["Variants"])].copy()
-    partial_out = ps[(ps["Total_Qty"]>0) & (ps["Zero_Vars"]>=ps["Variants"]*0.5)].copy()
+    partial_out = ps[
+        (ps["Total_Qty"] > 0) &
+        (ps["Zero_Vars"] >= ps["Variants"] * 0.5) &  # ≥50% sizes gone
+        (ps["Variants"] >= 3)                          # at least 3 variants (ignore 1-2 variant products)
+    ].copy()
     partial_out = partial_out.sort_values("Zero_Vars", ascending=False)
 
     # Category filter
@@ -857,14 +908,14 @@ def _show_overall():
         st.markdown(f"**🔴 Fully sold out ({len(fully_out)} styles)**")
         st.dataframe(fully_out[["Base Name","Variants","Sizes","Colors","Total_Qty"]].rename(
             columns={"Base Name":"Product","Total_Qty":"Stock"}),
-            use_container_width=True, hide_index=True)
+            width='stretch', hide_index=True)
 
     if view_s in ("⚠️ Missing Sizes","Both") and not partial_out.empty:
         st.markdown(f"**⚠️ Missing sizes ({len(partial_out)} styles — ≥50% variants gone)**")
         partial_out["Missing"] = partial_out["Zero_Vars"].astype(str) + "/" + partial_out["Variants"].astype(str) + " sizes gone"
         st.dataframe(partial_out[["Base Name","Missing","Sizes","Total_Qty"]].rename(
             columns={"Base Name":"Product","Total_Qty":"Stock"}),
-            use_container_width=True, hide_index=True)
+            width='stretch', hide_index=True)
 
     combined = pd.concat([
         fully_out.assign(Alert="Fully Sold Out"),
@@ -1058,7 +1109,7 @@ with tab3:
     for vcol in ["Est. Value","Est. Value (Adj)"]:
         if vcol in display.columns:
             display[vcol] = display[vcol].apply(fmt_npr)
-    st.dataframe(display, use_container_width=True, hide_index=True)
+    st.dataframe(display, width='stretch', hide_index=True)
 
     if st.button("⬇️ Download reorder plan as Excel"):
         out = BytesIO()
@@ -1090,7 +1141,7 @@ with tab4:
         "Total_Value":"Est. Value",
         "Reorder_Soon":"Reorder Soon",
     })
-    st.dataframe(loc_summary, use_container_width=True, hide_index=True)
+    st.dataframe(loc_summary, width='stretch', hide_index=True)
 
     # Sub-category breakdown when a parent is selected
     if sel_cat != "All":
@@ -1112,4 +1163,4 @@ with tab4:
             "Reorder_Soon":"Reorder Soon",
             "Avg_Weeks_Cover":"Avg Weeks Cover",
         })
-        st.dataframe(sub_summary, use_container_width=True, hide_index=True)
+        st.dataframe(sub_summary, width='stretch', hide_index=True)
