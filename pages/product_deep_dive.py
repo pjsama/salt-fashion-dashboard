@@ -39,11 +39,27 @@ SIZE_ORDER = ["XS","S","M","L","XL","2XL","3XL","4XL",
 def clean_name(name):
     """Strip [SKU] prefix, quotes, newlines, tabs, extra spaces."""
     name = str(name).strip()
-    name = re.sub(r"^\[[^\]]+\]\s*", "", name)   # strip [SKU] prefix
+    name = re.sub(r"^\[[^\]]+\]\s*", "", name)
     name = name.replace("\n", " ").replace("\t", " ")
-    name = re.sub(r'^"+|"+$', "", name)              # strip surrounding quotes
+    name = re.sub(r'^"+|"+$', "", name)
     name = re.sub(r"\s+", " ", name).strip()
     return name
+
+def clean_store_name(name):
+    """Clean store_analysis product names — strip [SKU] prefix AND color/size suffixes.
+    Store names look like: '[SA-11112-XL] Salt Trench Coat - Black - XL'
+    We want: 'Salt Trench Coat - Black'  to match template names.
+    """
+    name = clean_name(name)
+    # Strip " - Size" suffix at end (e.g. " - L", " - XL")
+    name = re.sub(r"\s*-\s*(XS|S|M|L|XL|2XL|3XL|4XL|XXL)\s*$", "", name, flags=re.I)
+    # Strip "/Color (Size)" suffix (e.g. "/Dark Brown (S)")
+    name = re.sub(r"/[\w\s]+\s*\((XS|S|M|L|XL|2XL|3XL|4XL|XXL)\)\s*$", "", name, flags=re.I)
+    # Strip " (Size)" suffix
+    name = re.sub(r"\s*\((XS|S|M|L|XL|2XL|3XL|4XL|XXL)\)\s*$", "", name, flags=re.I)
+    # Strip "-Size" glued suffix (e.g. "Jacket-M")
+    name = re.sub(r"-\s*(XS|S|M|L|XL|2XL|3XL|4XL|XXL)\s*$", "", name, flags=re.I)
+    return name.strip()
 
 def strip_variant_suffix(name):
     """Remove color/size suffixes: 'Dress/Black' → 'Dress', 'Dress Green / L' → 'Dress Green'."""
@@ -177,7 +193,7 @@ def load_store():
     if df is None: return None
     df.columns = [c.strip() for c in df.columns]
     # Strip [SKU] prefix from product names in store_analysis
-    df["Product"] = df["Product"].fillna("").astype(str).apply(clean_name)
+    df["Product"] = df["Product"].fillna("").astype(str).apply(clean_store_name)
     for col in ["Revenue (NPR)","Units Sold"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
@@ -306,17 +322,26 @@ num_variants = prod["Variants"]
 # variant_analysis Product Name is already cleaned (strip_[SKU]_prefix done in loader)
 # Now match against the canonical template name
 def find_variant_rows(df, product_name):
+    """Match product_name against variant_analysis Product Name.
+    Uses exact match first. Fuzzy match requires high word overlap to avoid
+    wrong matches (e.g. 'Black Long Dress' matching 'Black Dress', 'Black Top' etc.)
+    """
     if df is None or df.empty: return pd.DataFrame()
     # Exact match first
     rows = df[df["Product Name"] == product_name]
     if not rows.empty: return rows
-    # Fuzzy: check if variant_analysis name contains or is contained in product_name
-    pn_lower = product_name.lower()
-    mask = df["Product Name"].str.lower().apply(
-        lambda n: n == pn_lower or
-        (len(pn_lower) > 6 and (pn_lower in n or n in pn_lower)) or
-        len(set(pn_lower.split()) & set(n.split())) >= max(2, len(pn_lower.split()) - 1)
-    )
+    # Strict fuzzy: require ALL words of the shorter name to appear in the longer name
+    pn_words = set(product_name.lower().split())
+    pn_lower  = product_name.lower()
+    def strict_match(n):
+        n_lower = n.lower()
+        n_words  = set(n_lower.split())
+        if n_lower == pn_lower: return True
+        # Must share ALL words of shorter name (not just some)
+        shorter = pn_words if len(pn_words) <= len(n_words) else n_words
+        longer  = n_words  if len(pn_words) <= len(n_words) else pn_words
+        return shorter.issubset(longer) and len(shorter) >= 3
+    mask = df["Product Name"].str.lower().apply(strict_match)
     return df[mask].copy()
 
 p_sizes  = find_variant_rows(size_df,  sel_product)
@@ -421,8 +446,12 @@ if not p_sizes.empty and "Units Sold" in p_sizes.columns:
         st.markdown(f'<div class="insight">{"  ·  ".join(parts)}</div>', unsafe_allow_html=True)
 else:
     if size_df is not None:
-        st.info(f"No size data found for **{sel_product}** in variant_analysis. "
-                "The product may have no size variants, or the name doesn't match between files.")
+        st.info(
+            f"No size breakdown found for **{sel_product}** in variant_analysis. "
+            "Two common reasons: ① The product has no size attribute set in Odoo (e.g. single-size items), "
+            "or ② Each size was created as a **separate Odoo product** instead of variants — "
+            "in that case, see the Full SKU Breakdown table below which shows each size separately."
+        )
     else:
         st.info("Size data requires variant_analysis.xlsx — run `python variant_export.py`.")
 
@@ -448,8 +477,11 @@ if not p_colors.empty and "Units Sold" in p_colors.columns:
         st.markdown(f'<div class="insight">{"  ·  ".join(parts_c)}</div>', unsafe_allow_html=True)
 else:
     if color_df is not None:
-        st.info(f"No color variants found for **{sel_product}** — "
-                "this product may have sizes only, or name doesn't match between files.")
+        st.info(
+            f"No color breakdown for **{sel_product}**. "
+            "This is normal if: ① the product has no color attribute in Odoo (size-only variants), "
+            "or ② the product name differs between the product catalog and variant_analysis file."
+        )
     else:
         st.info("Color data requires variant_analysis.xlsx — run `python variant_export.py`.")
 
@@ -457,7 +489,7 @@ else:
 st.markdown('<div class="sec">🏪 Store Performance — where this product sells most</div>', unsafe_allow_html=True)
 
 if not p_stores.empty:
-    p_stores_d = p_stores[["Store","Units Sold","Revenue (NPR)"]].copy()
+    p_stores_d = p_stores[p_stores["Units Sold"] > 0][["Store","Units Sold","Revenue (NPR)"]].copy()
     p_stores_d = p_stores_d.sort_values("Units Sold", ascending=False)
     p_stores_d["Revenue (NPR)"] = p_stores_d["Revenue (NPR)"].apply(fmt_npr)
     col_s, col_b = st.columns([2,3])
@@ -476,8 +508,13 @@ if not p_stores.empty:
                 unsafe_allow_html=True)
 else:
     if df_store is not None:
-        st.info(f"**{sel_product}** doesn't appear in the top 20 at any store — "
-                "lower-volume product. Store data is only kept for top 20 sellers per store.")
+        st.info(
+            f"**{sel_product}** sold {int(total_sold)} units total but doesn't rank in the "
+            f"top 20 at any store. The store_analysis file tracks only the top 20 products per store. "
+            f"To appear here, a SALT product needs ~7+ units at Lazimpat/Kumaripati or ~4+ at Pokhara "
+            f"in the current export period. Summer dresses won't appear during winter season — "
+            f"that's expected, not a data error."
+        )
     else:
         st.info("Store data requires store_analysis.xlsx — check Google Drive.")
 
