@@ -149,7 +149,9 @@ def load_variants():
             size_df  = pd.read_excel(local, sheet_name="Size Breakdown",  engine="openpyxl")
             color_df = pd.read_excel(local, sheet_name="Color Breakdown", engine="openpyxl")
     if size_df is None: return None, None
-    for df in [size_df, color_df]:
+
+    def _prep(df):
+        df = df.copy()
         df.columns = [c.strip() for c in df.columns]
         df["Product Name"] = df["Product Name"].fillna("").astype(str).apply(clean_name)
         for col in ["Units Sold","In Stock","STR %"]:
@@ -159,6 +161,41 @@ def load_variants():
             if col in df.columns:
                 df[col] = df[col].fillna("").astype(str)\
                     .str.replace(r"^(Size|Color|Brand):\s*","",regex=True).str.strip()
+        return df
+
+    size_df  = _prep(size_df)
+    color_df = _prep(color_df)
+
+    # ── Size Breakdown: strip /Color suffix and aggregate by (product, size) ──
+    # variant_analysis stores "Dress/Brown" and "Dress/Pink" as separate rows
+    # We need to collapse them into one "Dress" row per size, summing sold+stock
+    def _get_status(s):
+        if s >= 95: return "Super Fast"
+        if s >= 70: return "Fast"
+        if s >= 30: return "Medium"
+        if s > 0:   return "Slow"
+        return "Dead"
+
+    # Strip /Color from product name in size sheet
+    size_df["Product Name"] = size_df["Product Name"].apply(
+        lambda n: re.sub(r"/[^/]+$", "", n).strip())
+
+    # Aggregate by (Product Name, Brand, Category, Sub Category, Size)
+    grp_cols = [c for c in ["Product Name","Brand","Category","Sub Category","Size"]
+                if c in size_df.columns]
+    size_agg = size_df.groupby(grp_cols, as_index=False).agg(
+        **{"Units Sold": ("Units Sold","sum"),
+           "In Stock":   ("In Stock",  "sum")}
+    )
+    total = size_agg["Units Sold"] + size_agg["In Stock"]
+    size_agg["STR %"]  = (size_agg["Units Sold"] / total.replace(0, float("nan")) * 100).fillna(0).round(1)
+    size_agg["Status"] = size_agg["STR %"].apply(_get_status)
+    size_df = size_agg
+
+    # Color Breakdown: strip /Size suffix if present (mirror clean)
+    color_df["Product Name"] = color_df["Product Name"].apply(
+        lambda n: re.sub(r"/[^/]+$", "", n).strip())
+
     return size_df, color_df
 
 @st.cache_resource(show_spinner=False)
