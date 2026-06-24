@@ -342,21 +342,8 @@ def find_store_rows(df_store, product_name):
 p_stores = find_store_rows(df_store, sel_product)
 
 # ── Reorder calculation ───────────────────────────────────────────────────────
-# Two methods shown side by side:
-#
-# Method A — STR-based (restore original stock):
-#   Suggest = max(0, Units_Sold - In_Stock)
-#   Logic: "put back what sold" — simple, ignores sell speed
-#   Good for: fast sellers you want to restore to full stock
-#
-# Method B — Weeks-based (target buffer):
-#   weekly_rate = (product_total_sold / weeks_live) × (size_sold / total_size_sold)
-#   Suggest = max(0, weekly_rate × target_weeks - in_stock)
-#   Logic: "have enough to cover the next X weeks" — reorder plan logic
-#   Good for: planning ahead based on current velocity
-
-# Compute product-level weekly rate from Create Date
-import math as _math
+# Method A — STR-based: Suggest = max(0, Units_Sold - In_Stock)
+# Method B — Weeks-based: Suggest = max(0, weekly_rate × target_weeks - in_stock)
 
 today_ts = pd.Timestamp.today()
 create_date = prod_row["Create Date"].iloc[0] if "Create Date" in prod_row.columns else pd.NaT
@@ -367,56 +354,44 @@ if pd.notna(create_date):
     except:
         weeks_live = 52
 else:
-    weeks_live = 52  # assume 1 year if unknown
+    weeks_live = 52
 
 prod_weekly_rate = total_sold / weeks_live if weeks_live > 0 else 0
 
-# Size-level calculations
 if not p_sizes.empty and "Units Sold" in p_sizes.columns:
     total_size_sold = p_sizes["Units Sold"].sum()
-
     def calc_size_rate(size_sold):
         if total_size_sold > 0 and prod_weekly_rate > 0:
             return prod_weekly_rate * (size_sold / total_size_sold)
         return 0
-
-    p_sizes["Weekly Rate"] = p_sizes["Units Sold"].apply(calc_size_rate).round(2)
-    p_sizes["Weeks Cover"] = p_sizes.apply(
+    p_sizes["Weekly Rate"]     = p_sizes["Units Sold"].apply(calc_size_rate).round(2)
+    p_sizes["Weeks Cover"]     = p_sizes.apply(
         lambda r: round(r["In Stock"] / r["Weekly Rate"], 1)
-                  if r["Weekly Rate"] > 0 else (999 if r["In Stock"] > 0 else 0),
-        axis=1)
+                  if r["Weekly Rate"] > 0 else (999 if r["In Stock"] > 0 else 0), axis=1)
     p_sizes["Weeks Cover Fmt"] = p_sizes["Weeks Cover"].apply(
         lambda x: "—" if x >= 99 else f"{x:.1f} wks")
-
-    # Method A: STR-based (Fast/Super Fast only)
-    p_sizes["Suggest (STR)"] = p_sizes.apply(
+    p_sizes["Suggest (STR)"]   = p_sizes.apply(
         lambda r: max(0, round(r["Units Sold"] - r["In Stock"]))
         if r.get("Status","") in ("Super Fast","Fast") else 0, axis=1)
-
-    # Method B: Weeks-based (Fast/Super Fast only)
     p_sizes["Suggest (Weeks)"] = p_sizes.apply(
         lambda r: max(0, round(r["Weekly Rate"] * target_weeks - r["In Stock"]))
         if r.get("Status","") in ("Super Fast","Fast") else 0, axis=1)
-
     total_suggest_str   = int(p_sizes["Suggest (STR)"].sum())
     total_suggest_weeks = int(p_sizes["Suggest (Weeks)"].sum())
-    total_suggest = total_suggest_weeks  # primary KPI = weeks-based
-
+    total_suggest       = total_suggest_weeks
 else:
-    # Fallback: product-level weeks-based
     total_suggest_weeks = max(0, round(prod_weekly_rate * target_weeks - total_stock))
     total_suggest_str   = max(0, round(total_sold - total_stock))
     total_suggest       = total_suggest_weeks
 
-# Color-level calculations
 if not p_colors.empty and "Units Sold" in p_colors.columns:
     total_color_sold = p_colors["Units Sold"].sum()
     def calc_color_rate(color_sold):
         if total_color_sold > 0 and prod_weekly_rate > 0:
             return prod_weekly_rate * (color_sold / total_color_sold)
         return 0
-    p_colors["Weekly Rate"] = p_colors["Units Sold"].apply(calc_color_rate).round(2)
-    p_colors["Suggest (STR)"] = p_colors.apply(
+    p_colors["Weekly Rate"]     = p_colors["Units Sold"].apply(calc_color_rate).round(2)
+    p_colors["Suggest (STR)"]   = p_colors.apply(
         lambda r: max(0, round(r["Units Sold"] - r["In Stock"]))
         if r.get("Status","") in ("Super Fast","Fast") else 0, axis=1)
     p_colors["Suggest (Weeks)"] = p_colors.apply(
@@ -424,15 +399,14 @@ if not p_colors.empty and "Units Sold" in p_colors.columns:
         if r.get("Status","") in ("Super Fast","Fast") else 0, axis=1)
 
 # ── Verdict ───────────────────────────────────────────────────────────────────
+total_suggest_weeks = total_suggest_weeks if 'total_suggest_weeks' in dir() else total_suggest
+total_suggest_str   = total_suggest_str   if 'total_suggest_str'   in dir() else total_suggest
 if str_status in ("Super Fast","Fast") and total_suggest_weeks > 0:
     vc, vi = "verdict-reorder", "✅"
-    vt = (f"<strong>Reorder recommended — {total_suggest_weeks} units (weeks-based) "
-          f"/ {total_suggest_str} units (STR-based).</strong> "
-          f"Fast seller (STR {str_pct:.0f}%). "
-          f"See size table for per-size breakdown and store table for distribution.")
+    vt = f"<strong>Reorder recommended — {total_suggest} units.</strong> Fast seller (STR {str_pct:.0f}%). Suggest quantity = units sold minus current stock per fast-moving size."
 elif str_status in ("Super Fast","Fast"):
     vc, vi = "verdict-watch", "📦"
-    vt = f"Stock level OK for now. Strong seller (STR {str_pct:.0f}%) — watch closely, may need reorder soon."
+    vt = f"Stock level OK. Strong seller (STR {str_pct:.0f}%) — watch closely, may need reorder soon."
 elif str_status == "Medium":
     vc, vi = "verdict-watch", "⚠️"
     vt = f"Medium performer (STR {str_pct:.0f}%). Monitor — reorder only if specific sizes are running out."
@@ -471,21 +445,17 @@ st.markdown("<br>", unsafe_allow_html=True)
 st.markdown('<div class="sec">📏 Size Performance — which sizes sell vs which are stuck</div>', unsafe_allow_html=True)
 
 if not p_sizes.empty and "Units Sold" in p_sizes.columns:
-    # Build display — show weekly rate, weeks cover, both suggestions
     avail_cols = ["Size","Weekly Rate","In Stock","Weeks Cover Fmt","STR %","Status",
                   "Suggest (Weeks)","Suggest (STR)","Units Sold"]
     disp_cols  = [c for c in avail_cols if c in p_sizes.columns]
     disp = p_sizes[disp_cols].copy()
     disp["STR %"] = disp["STR %"].round(1)
-    if "Weekly Rate" in disp.columns:
-        disp = disp.rename(columns={"Weekly Rate": "Rate/wk",
-                                     "Weeks Cover Fmt": "Wks Cover",
-                                     "Suggest (Weeks)": f"Order (Wk)",
-                                     "Suggest (STR)":   "Order (STR)"})
+    disp = disp.rename(columns={"Weekly Rate":"Rate/wk","Weeks Cover Fmt":"Wks Cover",
+                                  "Suggest (Weeks)":"Order (Wk)","Suggest (STR)":"Order (STR)"})
     def style_weeks(val):
         try:
             v = float(str(val).replace(" wks",""))
-            if v <= 1:   return "color:#dc2626;font-weight:700"
+            if v <= 1:            return "color:#dc2626;font-weight:700"
             if v <= target_weeks: return "color:#d97706;font-weight:600"
             return "color:#16a34a"
         except: return ""
@@ -493,29 +463,19 @@ if not p_sizes.empty and "Units Sold" in p_sizes.columns:
         if isinstance(val,(int,float)) and val > 0:
             return "background-color:#dbeafe;color:#1e40af;font-weight:700"
         return ""
-    def style_order_s(val):
-        if isinstance(val,(int,float)) and val > 0:
-            return "background-color:#dcfce7;color:#166534;font-weight:700"
-        return ""
     fmt_d = {"STR %":"{:.1f}%","Units Sold":"{:,.0f}","In Stock":"{:,.0f}"}
-    if "Rate/wk" in disp.columns: fmt_d["Rate/wk"] = "{:.2f}"
+    if "Rate/wk"    in disp.columns: fmt_d["Rate/wk"]    = "{:.2f}"
     if "Order (Wk)" in disp.columns: fmt_d["Order (Wk)"] = "{:,.0f}"
     if "Order (STR)" in disp.columns: fmt_d["Order (STR)"] = "{:,.0f}"
     styled = disp.style.map(style_status, subset=["Status"])
-    if "Wks Cover" in disp.columns:
-        styled = styled.map(style_weeks, subset=["Wks Cover"])
-    if "Order (Wk)" in disp.columns:
-        styled = styled.map(style_order_w, subset=["Order (Wk)"])
-    if "Order (STR)" in disp.columns:
-        styled = styled.map(style_order_s, subset=["Order (STR)"])
+    if "Wks Cover"  in disp.columns: styled = styled.map(style_weeks,   subset=["Wks Cover"])
+    if "Order (Wk)" in disp.columns: styled = styled.map(style_order_w, subset=["Order (Wk)"])
+    if "Order (STR)" in disp.columns: styled = styled.map(style_reorder, subset=["Order (STR)"])
     styled = styled.format(fmt_d)
     st.dataframe(styled, width='stretch', hide_index=True)
-
-    # Method explanation
     st.caption(
-        f"🔵 **Order (Wk)** = weeks-based: have {target_weeks} weeks of stock at current sell rate.  "
-        f"🟢 **Order (STR)** = STR-based: restore back to original stock level.  "
-        f"Use Wk for ongoing replenishment, STR for full restocking."
+        f"🔵 **Order (Wk)** = weeks-based: {target_weeks} weeks of stock at current rate.  "
+        f"🟢 **Order (STR)** = STR-based: restore original stock level."
     )
 
     fast   = p_sizes[p_sizes["Status"].isin(["Super Fast","Fast"])]["Size"].tolist()
@@ -538,12 +498,30 @@ st.markdown('<div class="sec">🎨 Color Performance — which colors customers 
 
 if not p_colors.empty and "Units Sold" in p_colors.columns:
     p_colors = p_colors.sort_values("Units Sold", ascending=False)
-    disp_c = p_colors[["Color","Units Sold","In Stock","STR %","Status","Suggest Reorder"]].copy()
+    # Build color display with both order methods
+    color_avail = ["Color","Weekly Rate","Units Sold","In Stock","STR %","Status",
+                   "Suggest (Weeks)","Suggest (STR)"]
+    color_cols  = [c for c in color_avail if c in p_colors.columns]
+    disp_c = p_colors[color_cols].copy()
     disp_c["STR %"] = disp_c["STR %"].round(1)
-    styled_c = (disp_c.style
-                .map(style_status,  subset=["Status"])
-                .map(style_reorder, subset=["Suggest Reorder"])
-                .format({"STR %":"{:.1f}%","Units Sold":"{:,.0f}","In Stock":"{:,.0f}","Suggest Reorder":"{:,.0f}"}))
+    rename_c = {}
+    if "Weekly Rate"    in disp_c.columns: rename_c["Weekly Rate"]    = "Rate/wk"
+    if "Suggest (Weeks)" in disp_c.columns: rename_c["Suggest (Weeks)"] = "Order (Wk)"
+    if "Suggest (STR)"   in disp_c.columns: rename_c["Suggest (STR)"]   = "Order (STR)"
+    disp_c = disp_c.rename(columns=rename_c)
+    fmt_c = {"STR %":"{:.1f}%","Units Sold":"{:,.0f}","In Stock":"{:,.0f}"}
+    if "Rate/wk"    in disp_c.columns: fmt_c["Rate/wk"]    = "{:.2f}"
+    if "Order (Wk)" in disp_c.columns: fmt_c["Order (Wk)"] = "{:,.0f}"
+    if "Order (STR)" in disp_c.columns: fmt_c["Order (STR)"] = "{:,.0f}"
+    styled_c = disp_c.style.map(style_status, subset=["Status"])
+    if "Order (Wk)"  in disp_c.columns:
+        styled_c = styled_c.map(
+            lambda v: "background-color:#dbeafe;color:#1e40af;font-weight:700"
+                      if isinstance(v,(int,float)) and v > 0 else "",
+            subset=["Order (Wk)"])
+    if "Order (STR)" in disp_c.columns:
+        styled_c = styled_c.map(style_reorder, subset=["Order (STR)"])
+    styled_c = styled_c.format(fmt_c)
     st.dataframe(styled_c, width='stretch', hide_index=True)
 
     fast_c = p_colors[p_colors["Status"].isin(["Super Fast","Fast"])]["Color"].tolist()
@@ -587,46 +565,6 @@ else:
                 "lower-volume product. Store data is only kept for top 20 sellers per store.")
     else:
         st.info("Store data requires store_analysis.xlsx — check Google Drive.")
-
-# ── Store reorder distribution ───────────────────────────────────────────────
-if not p_stores.empty and total_suggest_weeks > 0:
-    st.markdown('<div class="sec">📦 How to distribute the reorder across stores</div>',
-                unsafe_allow_html=True)
-    st.caption(
-        f"Based on each store's share of total sales for this product. "
-        f"Total to order: **{total_suggest_weeks} units** (weeks-based). "
-        f"Adjust manually if a store's stock situation differs."
-    )
-
-    total_store_units = p_stores["Units Sold"].sum()
-    if total_store_units > 0:
-        dist = p_stores.copy()
-        dist["Sales Share %"]   = (dist["Units Sold"] / total_store_units * 100).round(1)
-        dist["Suggest Qty"]     = (dist["Units Sold"] / total_store_units * total_suggest_weeks).round().astype(int)
-        dist["Suggest Qty STR"] = (dist["Units Sold"] / total_store_units * total_suggest_str).round().astype(int)
-        dist = dist[dist["Suggest Qty"] > 0].sort_values("Suggest Qty", ascending=False)
-
-        dist_display = dist[["Store","Units Sold","Sales Share %",
-                              "Suggest Qty","Suggest Qty STR"]].rename(columns={
-            "Units Sold":      "Sold (period)",
-            "Suggest Qty":     f"Order (Wk) {target_weeks}wk",
-            "Suggest Qty STR": "Order (STR)",
-        })
-
-        def style_suggest_qty(val):
-            if isinstance(val,(int,float)) and val > 0:
-                return "background-color:#dbeafe;color:#1e40af;font-weight:700"
-            return ""
-
-        styled_dist = dist_display.style            .map(style_suggest_qty, subset=[f"Order (Wk) {target_weeks}wk"])            .format({"Sold (period)":"{:,.0f}","Sales Share %":"{:.1f}%",
-                     f"Order (Wk) {target_weeks}wk":"{:,.0f}","Order (STR)":"{:,.0f}"})
-        st.dataframe(styled_dist, width='stretch', hide_index=True)
-
-        # Total check row
-        total_dist = dist["Suggest Qty"].sum()
-        if abs(total_dist - total_suggest_weeks) > 1:
-            st.caption(f"Note: distributed {total_dist} units (rounding). "
-                       f"Target was {total_suggest_weeks}.")
 
 # ── Full SKU breakdown ────────────────────────────────────────────────────────
 st.markdown('<div class="sec">📋 Full SKU Breakdown — every size × color from Odoo</div>', unsafe_allow_html=True)
@@ -707,11 +645,15 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                    "Suggested Reorder": total_suggest}])\
       .to_excel(writer, sheet_name="Summary", index=False)
     if not p_sizes.empty:
-        p_sizes[["Size","Units Sold","In Stock","STR %","Status","Suggest Reorder"]]\
-            .to_excel(writer, sheet_name="By Size", index=False)
+        size_export_cols = [c for c in ["Size","Units Sold","In Stock","STR %","Status",
+                                         "Suggest (Weeks)","Suggest (STR)","Weekly Rate"] 
+                             if c in p_sizes.columns]
+        p_sizes[size_export_cols].to_excel(writer, sheet_name="By Size", index=False)
     if not p_colors.empty:
-        p_colors[["Color","Units Sold","In Stock","STR %","Status","Suggest Reorder"]]\
-            .to_excel(writer, sheet_name="By Color", index=False)
+        color_export_cols = [c for c in ["Color","Units Sold","In Stock","STR %","Status",
+                                          "Suggest (Weeks)","Suggest (STR)","Weekly Rate"] 
+                              if c in p_colors.columns]
+        p_colors[color_export_cols].to_excel(writer, sheet_name="By Color", index=False)
     if not p_stores.empty:
         p_stores[["Store","Units Sold","Revenue (NPR)"]].to_excel(writer, sheet_name="By Store", index=False)
     if not sku_rows.empty:
