@@ -327,7 +327,11 @@ with st.expander("💡 How reorder quantities are calculated"):
 # ── Category Summary ──────────────────────────────────────────────────────────
 st.markdown('<div class="sec">📊 Category Summary</div>', unsafe_allow_html=True)
 
-cat_sum = prod_sum.groupby("Category").agg(
+# Group by Category + Sub Category if sub cat exists and is populated
+has_sub = "Sub Category" in prod_sum.columns and prod_sum["Sub Category"].str.strip().ne("").any()
+cat_grp_cols = ["Category","Sub Category"] if has_sub else ["Category"]
+
+cat_sum = prod_sum.groupby(cat_grp_cols).agg(
     Products    = ("Product Name","count"),
     Total_Sold  = ("Total_Sold",  "sum"),
     Total_Stock = ("Total_Stock", "sum"),
@@ -335,13 +339,14 @@ cat_sum = prod_sum.groupby("Category").agg(
     Order_Wk    = ("Reorder_Wk",  "sum"),
     Order_STR   = ("Reorder_STR", "sum"),
     Est_Value   = ("Est_Value",   "sum"),
-).reset_index().sort_values("Order_Wk", ascending=False)
+).reset_index().sort_values(["Category","Order_Wk"], ascending=[True,False])
 
 cat_sum["Avg_STR"]   = cat_sum["Avg_STR"].round(1)
 cat_sum["Est_Value"] = cat_sum["Est_Value"].apply(fmt_npr)
 cat_sum = cat_sum.rename(columns={
     "Products":"# Products","Total_Sold":"Units Sold","Total_Stock":"In Stock",
-    "Avg_STR":"Avg STR %","Order_Wk":f"Order (Wk/{target_weeks}wk)","Order_STR":"Order (STR)","Est_Value":"Est. Value"
+    "Avg_STR":"Avg STR %","Order_Wk":f"Order (Wk/{target_weeks}wk)",
+    "Order_STR":"Order (STR)","Est_Value":"Est. Value"
 })
 
 def _cat_style(val):
@@ -349,11 +354,18 @@ def _cat_style(val):
         return "background-color:#dbeafe;color:#1e40af;font-weight:700"
     return ""
 
+# Column order: Category, Sub Category (if present), then rest
+display_cols = (["Category","Sub Category"] if has_sub else ["Category"]) + \
+               ["# Products","Units Sold","In Stock","Avg STR %",
+                f"Order (Wk/{target_weeks}wk)","Order (STR)","Est. Value"]
+display_cols = [c for c in display_cols if c in cat_sum.columns]
+
 st.dataframe(
-    cat_sum.style.map(_cat_style, subset=[f"Order (Wk/{target_weeks}wk)","Order (STR)"])
+    cat_sum[display_cols].style.map(_cat_style, subset=[f"Order (Wk/{target_weeks}wk)","Order (STR)"])
                  .format({"Avg STR %":"{:.1f}%","Units Sold":"{:,.0f}","In Stock":"{:,.0f}",
                           f"Order (Wk/{target_weeks}wk)":"{:,.0f}","Order (STR)":"{:,.0f}"}),
     width='stretch', hide_index=True)
+st.caption("Sorted by Category A–Z, then by Order Qty descending within each category")
 
 # ── Product Table ─────────────────────────────────────────────────────────────
 st.markdown('<div class="sec">📋 Product-Level Reorder Plan</div>', unsafe_allow_html=True)
