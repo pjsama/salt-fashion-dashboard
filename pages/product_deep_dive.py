@@ -176,6 +176,32 @@ def load_variants():
         if s > 0:   return "Slow"
         return "Dead"
 
+    # ── Extract color embedded in product name BEFORE stripping ────────────
+    # variant_analysis stores "Dress/Brown" and "Dress/Pink" as size rows with
+    # no Color column entry. We extract the color suffix, aggregate by color,
+    # and inject those rows into color_df for products not already covered.
+    size_df["_extracted_color"] = size_df["Product Name"].apply(
+        lambda n: re.search(r"/([^/]+)$", n).group(1).strip()
+                  if re.search(r"/([^/]+)$", n) else "")
+
+    # Build synthetic color breakdown from rows that have /Color suffix
+    size_with_color = size_df[size_df["_extracted_color"] != ""].copy()
+    size_with_color["Product Name"] = size_with_color["Product Name"].apply(
+        lambda n: re.sub(r"/[^/]+$", "", n).strip())
+
+    if not size_with_color.empty:
+        grp_c = [c for c in ["Product Name","Brand","Category","Sub Category","_extracted_color"]
+                 if c in size_with_color.columns]
+        color_synth = size_with_color.groupby(grp_c, as_index=False).agg(
+            **{"Units Sold": ("Units Sold","sum"),
+               "In Stock":   ("In Stock",  "sum")}
+        ).rename(columns={"_extracted_color": "Color"})
+        total_c = color_synth["Units Sold"] + color_synth["In Stock"]
+        color_synth["STR %"]  = (color_synth["Units Sold"] / total_c.replace(0, float("nan")) * 100).fillna(0).round(1)
+        color_synth["Status"] = color_synth["STR %"].apply(_get_status)
+    else:
+        color_synth = None
+
     # Strip /Color from product name in size sheet
     size_df["Product Name"] = size_df["Product Name"].apply(
         lambda n: re.sub(r"/[^/]+$", "", n).strip())
@@ -195,6 +221,14 @@ def load_variants():
     # Color Breakdown: strip /Size suffix if present (mirror clean)
     color_df["Product Name"] = color_df["Product Name"].apply(
         lambda n: re.sub(r"/[^/]+$", "", n).strip())
+
+    # Merge synthetic color rows into color_df for products not already there
+    if color_synth is not None and not color_synth.empty:
+        already_covered = set(color_df["Product Name"].unique())
+        new_rows = color_synth[~color_synth["Product Name"].isin(already_covered)]
+        if not new_rows.empty:
+            import pandas as _pd
+            color_df = _pd.concat([color_df, new_rows], ignore_index=True)
 
     return size_df, color_df
 
