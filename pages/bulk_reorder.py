@@ -667,15 +667,15 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                                 "Est_Value":"Est. Value NPR"})
     full.to_excel(writer, sheet_name="Product Reorder Plan", index=False)
 
-    if size_df is not None and not sz.empty:
+    if size_df is not None and "sz" in dir() and not sz.empty:
         sz_exp = sz[["Product Name","Size","Units Sold","In Stock","STR %","Status","Weekly Rate","Order (Wk)","Order (STR)"]].copy()
         sz_exp.to_excel(writer, sheet_name="By Size", index=False)
 
-    if color_df is not None and not cl.empty:
+    if color_df is not None and "cl" in dir() and not cl.empty:
         cl_exp = cl[["Product Name","Color","Units Sold","In Stock","STR %","Status","Order (STR)"]].copy()
         cl_exp.to_excel(writer, sheet_name="By Color", index=False)
 
-    if df_prodstore is not None and not store_totals.empty:
+    if df_prodstore is not None and "store_totals" in dir() and not store_totals.empty:
         store_totals.rename(columns={"Units_Sold":"Units Sold","Share_%":"Share %",
                                      "Order_Wk":"Order (Wk)","Order_STR":"Order (STR)"})\
             .to_excel(writer, sheet_name="By Store", index=False)
