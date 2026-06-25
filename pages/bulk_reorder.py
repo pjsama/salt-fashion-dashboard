@@ -23,8 +23,12 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ── Google Drive IDs ──────────────────────────────────────────────────────────
-GDRIVE_MAIN_ID    = "1kIHUlGCallLjXe9tiBrYDQ16ElQDmLR3"
-GDRIVE_VARIANT_ID = "1LPeoGXDDd3ZAppTiuLskzY4q-71CJWfJ"
+GDRIVE_MAIN_ID      = "1kIHUlGCallLjXe9tiBrYDQ16ElQDmLR3"
+GDRIVE_VARIANT_ID   = "1LPeoGXDDd3ZAppTiuLskzY4q-71CJWfJ"
+GDRIVE_PRODSTORE_ID = "10ZvRKu4icGDw_g95PplVVdKmj_m-Zpo4"
+
+LOCATION_ORDER = ["Baneshwor","Lazimpat","Kumaripati","Chitwan","Pokhara","Online",
+                  "Baneshwor Lush","Chitwan Lush","Pokhara Lush"]
 
 SIZE_ORDER = ["XS","S","M","L","XL","2XL","3XL","4XL","5XL","ONE SIZE","FREE SIZE",
               "36","37","38","39","40","41","42","43","44"]
@@ -197,10 +201,36 @@ def load_variants():
     return size_df, color_df
 
 
+@st.cache_resource(show_spinner=False)
+def load_product_store():
+    buf = _gdrive(GDRIVE_PRODSTORE_ID)
+    df = None
+    if buf:
+        try: df = pd.read_excel(buf, sheet_name="Product × Store", engine="openpyxl")
+        except: pass
+    if df is None:
+        base = r"C:\Users\Legion\Desktop\odoo_export\exports"
+        files = sorted(Path(base).glob("product_store_sales_*.xlsx"), reverse=True) \
+                if Path(base).exists() else []
+        if files:
+            try: df = pd.read_excel(files[0], sheet_name="Product × Store", engine="openpyxl")
+            except: pass
+    if df is None or df.empty: return None
+    df.columns = [str(c).strip() for c in df.columns]
+    for col in ["Units Sold","Revenue (NPR)"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    for col in ["Product Name","Brand","Category","Store"]:
+        if col in df.columns:
+            df[col] = df[col].fillna("").astype(str).str.strip()
+    return df
+
+
 # ── Load ──────────────────────────────────────────────────────────────────────
 with st.spinner("Loading data…"):
-    df_prod     = load_products()
-    size_df, color_df = load_variants()
+    df_prod            = load_products()
+    size_df, color_df  = load_variants()
+    df_prodstore       = load_product_store()
 
 if df_prod is None:
     st.error("Could not load product data."); st.stop()
@@ -214,8 +244,9 @@ with st.sidebar:
                      if b and b not in ("","nan","True","False")])
     sel_brand = st.selectbox("Brand", brands)
 
+    JUNK_CATS_DISP = {"all", "saleable", "pos", "", "nan", "none", "true", "false"}
     cats = ["All"] + sorted([c for c in df_prod[df_prod["Brand"]==sel_brand]["Category"].unique()
-                              if c and c not in ("","nan")])
+                              if c.strip().lower() not in JUNK_CATS_DISP])
     sel_cat = st.selectbox("Category", cats)
 
     st.markdown("---")
@@ -240,6 +271,10 @@ if sel_cat != "All":
 
 # ── Build product-level summary ───────────────────────────────────────────────
 grp_cols = ["Product Name","Category","Sub Category"] if "Sub Category" in bdf.columns else ["Product Name","Category"]
+# Remove rows where Category is empty/junk (Odoo internal paths like "All", "Saleable")
+JUNK_CATS = {"all", "saleable", "pos", "", "nan", "none", "true", "false"}
+bdf = bdf[~bdf["Category"].str.strip().str.lower().isin(JUNK_CATS)]
+
 prod_sum = bdf.groupby(grp_cols).agg(
     Total_Sold  = ("Total Units Sold","sum"),
     Total_Stock = ("On Hand Qty",     "sum"),
@@ -454,6 +489,130 @@ if data_source.startswith("Variant") and color_df is not None and sel_cat != "Al
     else:
         st.info(f"No Super Fast or Fast colors found for {sel_brand} / {sel_cat}.")
 
+# ── Store Distribution ────────────────────────────────────────────────────────
+st.markdown('<div class="sec">🏪 Reorder Distribution by Store</div>', unsafe_allow_html=True)
+
+if df_prodstore is None:
+    st.info("Store sales data not available. Run `fetch_product_store_sales.py` and set GDRIVE_PRODSTORE_ID.")
+else:
+    # Filter product×store data to selected brand + category
+    ps = df_prodstore[df_prodstore["Brand"].str.strip() == sel_brand].copy()
+    if sel_cat != "All" and "Category" in ps.columns:
+        ps = ps[ps["Category"].str.strip() == sel_cat]
+
+    if ps.empty:
+        st.info(f"No store sales data found for **{sel_brand}** / {sel_cat}.")
+    else:
+        # ── Two views: by Store total, and by Category × Store ────────────────
+        tab_store, tab_catstore = st.tabs(["📍 By Store", "📊 Category × Store"])
+
+        # Aggregate total units sold per store for this brand+category
+        store_totals = ps.groupby("Store").agg(
+            Units_Sold    = ("Units Sold",    "sum"),
+            Revenue       = ("Revenue (NPR)", "sum"),
+        ).reset_index()
+
+        # Sort by LOCATION_ORDER
+        store_totals["_order"] = store_totals["Store"].apply(
+            lambda x: LOCATION_ORDER.index(x) if x in LOCATION_ORDER else 99)
+        store_totals = store_totals.sort_values("_order").drop(columns=["_order"])
+
+        grand_sold = store_totals["Units_Sold"].sum()
+        store_totals["Share_%"] = (store_totals["Units_Sold"] / grand_sold * 100
+                                   ).round(1) if grand_sold > 0 else 0
+
+        # Distribute total reorder qty by store share
+        store_totals["Order_Wk"]  = (store_totals["Share_%"] / 100 * total_units_wk ).round().astype(int)
+        store_totals["Order_STR"] = (store_totals["Share_%"] / 100 * total_units_str).round().astype(int)
+
+        # Filter to stores with actual sales
+        store_totals = store_totals[store_totals["Units_Sold"] > 0]
+
+        def _style_ord(val):
+            if isinstance(val,(int,float)) and val > 0:
+                return "background-color:#dbeafe;color:#1e40af;font-weight:700"
+            return ""
+
+        def _style_str_ord(val):
+            if isinstance(val,(int,float)) and val > 0:
+                return "background-color:#ede9fe;color:#5b21b6;font-weight:700"
+            return ""
+
+        with tab_store:
+            col_tbl, col_bar = st.columns([2, 3])
+            with col_tbl:
+                disp_st = store_totals[["Store","Units_Sold","Share_%","Order_Wk","Order_STR"]].copy()
+                disp_st = disp_st.rename(columns={
+                    "Units_Sold":"Units Sold","Share_%":"Share %",
+                    "Order_Wk":f"Order (Wk)","Order_STR":"Order (STR)"
+                })
+                st.dataframe(
+                    disp_st.style
+                        .map(_style_ord,     subset=["Order (Wk)"])
+                        .map(_style_str_ord, subset=["Order (STR)"])
+                        .format({"Units Sold":"{:,.0f}","Share %":"{:.1f}%",
+                                 "Order (Wk)":"{:,.0f}","Order (STR)":"{:,.0f}"}),
+                    width='stretch', hide_index=True)
+                st.caption(
+                    f"Total: {store_totals['Order_Wk'].sum():,} units (Wk) / "
+                    f"{store_totals['Order_STR'].sum():,} units (STR) across "
+                    f"{len(store_totals)} stores")
+
+            with col_bar:
+                st.markdown("**Sales share by store**")
+                max_u = store_totals["Units_Sold"].max() or 1
+                for _, row in store_totals.iterrows():
+                    pct = row["Units_Sold"] / max_u * 100
+                    st.markdown(
+                        f'<div style="margin-bottom:6px">'
+                        f'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:2px">'
+                        f'<span><strong>{row["Store"]}</strong></span>'
+                        f'<span style="color:#6b7280">{int(row["Units_Sold"]):,} units · '
+                        f'{row["Share_%"]:.0f}% · <span style="color:#1d4ed8">Order {int(row["Order_Wk"])} (Wk)</span></span>'
+                        f'</div>'
+                        f'<div style="background:#e2e8f0;border-radius:4px;height:8px">'
+                        f'<div style="background:#1d4ed8;width:{pct:.0f}%;height:8px;border-radius:4px"></div>'
+                        f'</div></div>', unsafe_allow_html=True)
+
+        with tab_catstore:
+            # Category × Store pivot — units sold
+            if "Category" in ps.columns and "Sub Category" in ps.columns:
+                grp_key = ["Category","Sub Category","Store"]
+            elif "Category" in ps.columns:
+                grp_key = ["Category","Store"]
+            else:
+                grp_key = ["Store"]
+
+            cat_store = ps.groupby(grp_key).agg(
+                Units_Sold = ("Units Sold","sum")
+            ).reset_index()
+
+            # Build pivot: rows = Category (+ Sub Cat), cols = stores
+            stores_present = [s for s in LOCATION_ORDER if s in cat_store["Store"].unique()]
+            pivot_cols = ["Category","Sub Category"] if "Sub Category" in cat_store.columns else ["Category"]
+            pivot = cat_store.pivot_table(
+                index=pivot_cols, columns="Store", values="Units_Sold",
+                aggfunc="sum", fill_value=0
+            ).reset_index()
+            pivot.columns.name = None
+
+            # Add total and sort
+            store_cols_present = [c for c in stores_present if c in pivot.columns]
+            pivot["Total"] = pivot[store_cols_present].sum(axis=1)
+            pivot = pivot.sort_values("Total", ascending=False)
+
+            # Distribute reorder qty per (category/subcat) × store
+            # Get reorder totals per category from cat_sum
+            cat_sum_lookup = prod_sum.groupby(
+                ["Category","Sub Category"] if "Sub Category" in prod_sum.columns else ["Category"]
+            ).agg(Order_Wk=("Reorder_Wk","sum"), Order_STR=("Reorder_STR","sum")).reset_index()
+
+            st.dataframe(
+                pivot.style.format({c: "{:,.0f}" for c in store_cols_present + ["Total"]}),
+                width='stretch', hide_index=True)
+            st.caption("Units sold per category per store — use to judge how to split your order geographically")
+
+
 # ── Download ──────────────────────────────────────────────────────────────────
 st.markdown("---")
 out = BytesIO()
@@ -492,6 +651,23 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
         cl_cols = [c for c in ["Product Name","Category","Sub Category","Color","Units Sold","In Stock","STR %","Status","Suggest"]
                    if c in cl_export.columns]
         cl_export[cl_cols].sort_values(["Product Name"]).to_excel(writer, sheet_name="By Color", index=False)
+
+    # Store distribution sheet
+    if df_prodstore is not None:
+        ps_dl = df_prodstore[df_prodstore["Brand"].str.strip() == sel_brand].copy()
+        if sel_cat != "All" and "Category" in ps_dl.columns:
+            ps_dl = ps_dl[ps_dl["Category"].str.strip() == sel_cat]
+        if not ps_dl.empty:
+            st_dl = ps_dl.groupby("Store").agg(
+                Units_Sold=("Units Sold","sum"), Revenue=("Revenue (NPR)","sum")
+            ).reset_index()
+            grand = st_dl["Units_Sold"].sum()
+            st_dl["Share_%"]  = (st_dl["Units_Sold"] / grand * 100).round(1) if grand > 0 else 0
+            st_dl["Order_Wk"] = (st_dl["Share_%"] / 100 * total_units_wk).round().astype(int)
+            st_dl["Order_STR"]= (st_dl["Share_%"] / 100 * total_units_str).round().astype(int)
+            st_dl = st_dl.rename(columns={"Units_Sold":"Units Sold","Share_%":"Share %",
+                                          "Order_Wk":"Order (Wk)","Order_STR":"Order (STR)"})
+            st_dl.to_excel(writer, sheet_name="By Store", index=False)
 
 out.seek(0)
 fname = f"reorder_{sel_brand.replace(' ','_')}_{sel_cat.replace(' ','_') if sel_cat!='All' else 'AllCats'}.xlsx"
