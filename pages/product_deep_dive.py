@@ -406,7 +406,12 @@ def find_variant_rows(df, product_name):
     )
     return df[mask].copy()
 
-p_sizes  = find_variant_rows(size_df,  sel_product)
+# Size: exact match only — fuzzy pulls in 10+ unrelated products
+# e.g. "A-line Green Dress Green" matches any dress with "green"+"a-line"
+if size_df is not None and not size_df.empty:
+    p_sizes = size_df[size_df["Product Name"].str.strip() == sel_product.strip()].copy()
+else:
+    p_sizes = pd.DataFrame()
 # Color: exact match only — fuzzy matching pulls in wrong products
 # e.g. "A-line Green Dress Green" would fuzzy-match any dress with "green"
 if color_df is not None and not color_df.empty:
