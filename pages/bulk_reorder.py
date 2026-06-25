@@ -464,110 +464,199 @@ if "Order (STR)" in disp.columns: _st = _st.map(_style_order, subset=["Order (ST
 st.dataframe(_st.format(fmt_d), width='stretch', hide_index=True)
 st.caption(f"{len(disp):,} products · 🔵 Order (Wk) = {target_weeks}-week buffer · 🟣 Order (STR) = restore original stock")
 
-# ── Size Breakdown — per product, all Fast+ items ────────────────────────────
-st.markdown('<div class="sec">📏 Size Breakdown by Product</div>', unsafe_allow_html=True)
-
-if size_df is None:
-    st.info("Variant data not available. Run `variant_export.py` first.")
-else:
-    # Get fast/superfast products from prod_sum
-    fast_products = set(prod_sum[prod_sum["STR_Status"].isin(["Super Fast","Fast"])]["Product Name"].str.strip())
-
-    # Filter size_df to brand + category + fast products
-    sz = size_df[size_df["Brand"].str.strip() == sel_brand].copy()
-    if sel_cat != "All":
-        sz = sz[sz["Category"].str.strip() == sel_cat]
-    if sel_sub != "All" and "Sub Category" in sz.columns:
-        sz = sz[sz["Sub Category"].str.strip() == sel_sub]
-    if search.strip():
-        sz = sz[sz["Product Name"].str.contains(search.strip(), case=False, na=False)]
-
-    # Only show products that are in our filtered prod_sum (respects STR filter)
-    filtered_products = set(prod_sum["Product Name"].str.strip())
-    sz = sz[sz["Product Name"].str.strip().isin(filtered_products)]
-
-    if sz.empty:
-        st.info(f"No size data for the current filters.")
-    else:
-        # Sort sizes correctly
-        sz["_sk"] = sz["Size"].apply(lambda s: SIZE_ORDER.index(s) if s in SIZE_ORDER else 99)
-        sz = sz.sort_values(["Product Name","_sk"]).drop(columns=["_sk"])
-
-        # Add weekly rate from prod_sum for reorder calculation
+# ── Pre-compute size / color / store lookups for the expanders ────────────────
+# Size lookup: product_name -> DataFrame of sizes with reorder qtys
+sz = pd.DataFrame()
+if size_df is not None:
+    _sz = size_df[size_df["Brand"].str.strip() == sel_brand].copy()
+    if sel_cat != "All" and "Category" in _sz.columns:
+        _sz = _sz[_sz["Category"].str.strip() == sel_cat]
+    filtered_products_set = set(prod_sum["Product Name"].str.strip())
+    _sz = _sz[_sz["Product Name"].str.strip().isin(filtered_products_set)]
+    if not _sz.empty:
+        _sz["_sk"] = _sz["Size"].apply(lambda s: SIZE_ORDER.index(s) if s in SIZE_ORDER else 99)
+        _sz = _sz.sort_values(["Product Name","_sk"]).drop(columns=["_sk"])
         rate_map = prod_sum.set_index("Product Name")["Weekly_Rate"].to_dict()
-        sz["_prod_rate"] = sz["Product Name"].map(rate_map).fillna(0)
+        _sz["_prod_rate"] = _sz["Product Name"].map(rate_map).fillna(0)
+        prod_total_sold = _sz.groupby("Product Name")["Units Sold"].transform("sum")
+        _sz["_size_share"] = (_sz["Units Sold"] / prod_total_sold.replace(0, float("nan"))).fillna(
+            1.0 / _sz.groupby("Product Name")["Units Sold"].transform("count"))
+        _sz["Weekly Rate"] = (_sz["_prod_rate"] * _sz["_size_share"]).round(2)
+        _sz["Order (Wk)"]  = (_sz["Weekly Rate"] * target_weeks - _sz["In Stock"]).clip(lower=0).round().astype(int)
+        _sz["Order (STR)"] = (_sz["Units Sold"]  - _sz["In Stock"]).clip(lower=0).round().astype(int)
+        sz = _sz
 
-        # Size share = this size's sold / total sold for the product
-        prod_total_sold = sz.groupby("Product Name")["Units Sold"].transform("sum")
-        sz["_size_share"] = sz["Units Sold"] / prod_total_sold.replace(0, float("nan"))
-        sz["_size_share"] = sz["_size_share"].fillna(1.0 / sz.groupby("Product Name")["Units Sold"].transform("count"))
-
-        # Reorder qty per size using two methods
-        sz["Weekly Rate"] = (sz["_prod_rate"] * sz["_size_share"]).round(2)
-        sz["Order (Wk)"]  = (sz["Weekly Rate"] * target_weeks - sz["In Stock"]).clip(lower=0).round().astype(int)
-        sz["Order (STR)"] = (sz["Units Sold"]  - sz["In Stock"]).clip(lower=0).round().astype(int)
-
-        disp_sz = sz[["Product Name","Size","Units Sold","In Stock","STR %","Status","Weekly Rate","Order (Wk)","Order (STR)"]].copy()
-
-        def _style_sz_status(val):
-            return {"Super Fast":"background-color:#1B5E20;color:white","Fast":"background-color:#43A047;color:white",
-                    "Medium":"background-color:#F9A825;color:black","Slow":"background-color:#E53935;color:white",
-                    "Dead":"background-color:#424242;color:white"}.get(val,"")
-
-        def _style_sz_order(val):
-            if isinstance(val,(int,float)) and val > 0:
-                return "background-color:#dbeafe;color:#1e40af;font-weight:700"
-            return ""
-
-        def _style_sz_str(val):
-            if isinstance(val,(int,float)) and val > 0:
-                return "background-color:#ede9fe;color:#5b21b6;font-weight:700"
-            return ""
-
-        _sst = (disp_sz.style
-            .map(_style_sz_status, subset=["Status"])
-            .map(_style_sz_order,  subset=["Order (Wk)"])
-            .map(_style_sz_str,    subset=["Order (STR)"])
-            .format({"STR %":"{:.1f}%","Units Sold":"{:,.0f}","In Stock":"{:,.0f}",
-                     "Weekly Rate":"{:.2f}","Order (Wk)":"{:,.0f}","Order (STR)":"{:,.0f}"}))
-        st.dataframe(_sst, width='stretch', hide_index=True)
-        st.caption(
-            f"{len(sz):,} size rows across {sz['Product Name'].nunique():,} products · "
-            f"🔵 Order (Wk) = {target_weeks}-week buffer per size · "
-            f"🟣 Order (STR) = restore to original level"
-        )
-
-# ── Color Breakdown ───────────────────────────────────────────────────────────
+# Color lookup: product_name -> DataFrame of colors
+cl = pd.DataFrame()
 if color_df is not None:
-    st.markdown('<div class="sec">🎨 Color Breakdown by Product</div>', unsafe_allow_html=True)
+    _cl = color_df[color_df["Brand"].str.strip() == sel_brand].copy()
+    if sel_cat != "All" and "Category" in _cl.columns:
+        _cl = _cl[_cl["Category"].str.strip() == sel_cat]
+    filtered_products_set = set(prod_sum["Product Name"].str.strip())
+    _cl = _cl[_cl["Product Name"].str.strip().isin(filtered_products_set)]
+    if not _cl.empty:
+        _cl = _cl.sort_values(["Product Name","Units Sold"], ascending=[True,False])
+        _cl["Order (STR)"] = (_cl["Units Sold"] - _cl["In Stock"]).clip(lower=0).round().astype(int)
+        cl = _cl
 
-    cl = color_df[color_df["Brand"].str.strip() == sel_brand].copy()
-    if sel_cat != "All":
-        cl = cl[cl["Category"].str.strip() == sel_cat]
-    if sel_sub != "All" and "Sub Category" in cl.columns:
-        cl = cl[cl["Sub Category"].str.strip() == sel_sub]
-    if search.strip():
-        cl = cl[cl["Product Name"].str.contains(search.strip(), case=False, na=False)]
+# Store lookup: product_name -> DataFrame of stores
+store_by_product = {}
+if df_prodstore is not None:
+    _ps_all = df_prodstore[df_prodstore["Brand"].str.strip() == sel_brand].copy()
+    if sel_cat != "All" and "Category" in _ps_all.columns:
+        _ps_all = _ps_all[_ps_all["Category"].str.strip() == sel_cat]
 
-    filtered_products = set(prod_sum["Product Name"].str.strip())
-    cl = cl[cl["Product Name"].str.strip().isin(filtered_products)]
-    cl = cl[cl["Status"].isin(["Super Fast","Fast"])]  # only fast colors
+# ── Style helpers for expanders ───────────────────────────────────────────────
+def _style_sz_status(val):
+    return {"Super Fast":"background-color:#1B5E20;color:white","Fast":"background-color:#43A047;color:white",
+            "Medium":"background-color:#F9A825;color:black","Slow":"background-color:#E53935;color:white",
+            "Dead":"background-color:#424242;color:white"}.get(val,"")
 
-    if cl.empty:
-        st.info("No Fast/Super Fast colors for current filters.")
-    else:
-        cl = cl.sort_values(["Product Name","Units Sold"], ascending=[True, False])
-        cl["Order (STR)"] = (cl["Units Sold"] - cl["In Stock"]).clip(lower=0).round().astype(int)
+def _style_sz_order(val):
+    return "background-color:#dbeafe;color:#1e40af;font-weight:700" if isinstance(val,(int,float)) and val > 0 else ""
 
-        disp_cl = cl[["Product Name","Color","Units Sold","In Stock","STR %","Status","Order (STR)"]].copy()
-        _cst = (disp_cl.style
-            .map(_style_sz_status, subset=["Status"])
-            .map(_style_sz_str,    subset=["Order (STR)"])
-            .format({"STR %":"{:.1f}%","Units Sold":"{:,.0f}","In Stock":"{:,.0f}","Order (STR)":"{:,.0f}"}))
-        st.dataframe(_cst, width='stretch', hide_index=True)
+def _style_sz_str(val):
+    return "background-color:#ede9fe;color:#5b21b6;font-weight:700" if isinstance(val,(int,float)) and val > 0 else ""
 
-# ── Store Distribution ────────────────────────────────────────────────────────
-st.markdown('<div class="sec">🏪 Reorder Distribution by Store</div>', unsafe_allow_html=True)
+# ── Per-product expanders ─────────────────────────────────────────────────────
+st.markdown('<div class="sec">📦 Product Detail — click any product to expand</div>', unsafe_allow_html=True)
+st.caption("Each row shows sizes, colors and store distribution for that product.")
+
+# Limit to top N to avoid rendering thousands of expanders
+MAX_EXPANDERS = 100
+products_to_show = prod_sum.head(MAX_EXPANDERS)
+if len(prod_sum) > MAX_EXPANDERS:
+    st.info(f"Showing {MAX_EXPANDERS} of {len(prod_sum)} products. Use search or category filters to narrow down.")
+
+for _, prow in products_to_show.iterrows():
+    pname    = prow["Product Name"]
+    pstatus  = prow["STR_Status"]
+    pstr     = prow["STR_Pct"]
+    psold    = int(prow["Total_Sold"])
+    pstock   = int(prow["Total_Stock"])
+    p_ord_wk = int(prow["Reorder_Wk"])
+    p_ord_st = int(prow["Reorder_STR"])
+    pcat     = prow.get("Category","")
+    psub     = prow.get("Sub Category","") if "Sub Category" in prow.index else ""
+
+    STATUS_COLOR = {"Super Fast":"#1B5E20","Fast":"#43A047","Medium":"#F9A825","Slow":"#E53935","Dead":"#424242"}
+    sc = STATUS_COLOR.get(pstatus,"#6b7280")
+
+    # Build expander label with key info visible without opening
+    label = (f"**{pname}** &nbsp; "
+             f"<span style='color:{sc};font-weight:700'>{pstatus}</span> &nbsp; "
+             f"STR {pstr:.0f}% &nbsp;·&nbsp; "
+             f"Sold {psold:,} &nbsp;·&nbsp; "
+             f"Stock {pstock:,} &nbsp;·&nbsp; "
+             f"🔵 Order {p_ord_wk:,} (Wk) &nbsp;·&nbsp; "
+             f"🟣 Order {p_ord_st:,} (STR)")
+
+    # Auto-expand if search is active (user is looking for a specific product)
+    auto_expand = bool(search.strip()) and search.strip().lower() in pname.lower()
+
+    with st.expander(f"{pname}  ·  {pstatus}  ·  STR {pstr:.0f}%  ·  Stock {pstock:,}  ·  🔵{p_ord_wk:,}  🟣{p_ord_st:,}", expanded=auto_expand):
+
+        # Header row with key numbers
+        h1, h2, h3, h4, h5 = st.columns(5)
+        for hcol, hval, hlbl, hclr in [
+            (h1, f"{pstr:.0f}%",       "STR %",          sc),
+            (h2, f"{psold:,}",         "Units Sold",      "#374151"),
+            (h3, f"{pstock:,}",        "In Stock",        "#374151"),
+            (h4, f"{p_ord_wk:,} units",f"Order (Wk/{target_weeks}wk)", "#1d4ed8"),
+            (h5, f"{p_ord_st:,} units","Order (STR)",     "#7c3aed"),
+        ]:
+            hcol.markdown(f'<div style="text-align:center;padding:8px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0">'
+                          f'<div style="font-size:18px;font-weight:700;color:{hclr}">{hval}</div>'
+                          f'<div style="font-size:10px;color:#6b7280">{hlbl}</div></div>',
+                          unsafe_allow_html=True)
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # Tabs: Sizes | Colors | Stores
+        has_sizes  = not sz.empty  and pname in sz["Product Name"].values
+        has_colors = not cl.empty  and pname in cl["Product Name"].values
+        has_stores = df_prodstore is not None
+
+        tab_labels = []
+        if has_sizes:  tab_labels.append("📏 Sizes")
+        if has_colors: tab_labels.append("🎨 Colors")
+        if has_stores: tab_labels.append("🏪 Stores")
+
+        if not tab_labels:
+            st.caption("No variant or store data found for this product.")
+        else:
+            tabs = st.tabs(tab_labels)
+            tab_idx = 0
+
+            if has_sizes:
+                with tabs[tab_idx]:
+                    p_sz = sz[sz["Product Name"] == pname][
+                        ["Size","Units Sold","In Stock","STR %","Status","Weekly Rate","Order (Wk)","Order (STR)"]
+                    ].copy()
+                    _t = (p_sz.style
+                        .map(_style_sz_status, subset=["Status"])
+                        .map(_style_sz_order,  subset=["Order (Wk)"])
+                        .map(_style_sz_str,    subset=["Order (STR)"])
+                        .format({"STR %":"{:.1f}%","Units Sold":"{:,.0f}","In Stock":"{:,.0f}",
+                                 "Weekly Rate":"{:.2f}","Order (Wk)":"{:,.0f}","Order (STR)":"{:,.0f}"}))
+                    st.dataframe(_t, width='stretch', hide_index=True)
+                    total_wk  = int(p_sz["Order (Wk)"].sum())
+                    total_str = int(p_sz["Order (STR)"].sum())
+                    st.caption(f"Total across all sizes: 🔵 {total_wk} units (Wk) · 🟣 {total_str} units (STR)")
+                tab_idx += 1
+
+            if has_colors:
+                with tabs[tab_idx]:
+                    p_cl = cl[cl["Product Name"] == pname][
+                        ["Color","Units Sold","In Stock","STR %","Status","Order (STR)"]
+                    ].copy()
+                    _tc = (p_cl.style
+                        .map(_style_sz_status, subset=["Status"])
+                        .map(_style_sz_str,    subset=["Order (STR)"])
+                        .format({"STR %":"{:.1f}%","Units Sold":"{:,.0f}",
+                                 "In Stock":"{:,.0f}","Order (STR)":"{:,.0f}"}))
+                    st.dataframe(_tc, width='stretch', hide_index=True)
+                tab_idx += 1
+
+            if has_stores:
+                with tabs[tab_idx]:
+                    p_store = _ps_all[_ps_all["Product Name"].str.strip() == pname].copy()
+                    if p_store.empty:
+                        # fuzzy: word overlap fallback
+                        pn_words = set(pname.lower().split())
+                        mask = _ps_all["Product Name"].str.lower().apply(
+                            lambda n: set(n.split()).issuperset(pn_words) and len(pn_words) >= 2)
+                        p_store = _ps_all[mask].copy()
+
+                    if p_store.empty:
+                        st.caption("This product has no store sales recorded.")
+                    else:
+                        p_store_agg = p_store.groupby("Store").agg(
+                            Units_Sold=("Units Sold","sum"),
+                            Revenue=("Revenue (NPR)","sum")
+                        ).reset_index()
+                        p_store_agg["_o"] = p_store_agg["Store"].apply(
+                            lambda x: LOCATION_ORDER.index(x) if x in LOCATION_ORDER else 99)
+                        p_store_agg = p_store_agg.sort_values("_o").drop(columns=["_o"])
+                        grand = p_store_agg["Units_Sold"].sum()
+                        p_store_agg["Share %"] = (p_store_agg["Units_Sold"] / grand * 100).round(1) if grand > 0 else 0
+                        p_store_agg["Order (Wk)"]  = (p_store_agg["Share %"] / 100 * p_ord_wk ).round().astype(int)
+                        p_store_agg["Order (STR)"] = (p_store_agg["Share %"] / 100 * p_ord_st).round().astype(int)
+                        p_store_agg = p_store_agg[p_store_agg["Units_Sold"] > 0]
+                        p_store_agg["Revenue"] = p_store_agg["Revenue"].apply(fmt_npr)
+                        p_store_agg = p_store_agg.rename(columns={"Units_Sold":"Units Sold","Revenue":"Revenue (NPR)"})
+
+                        _ts = (p_store_agg[["Store","Units Sold","Share %","Order (Wk)","Order (STR)","Revenue (NPR)"]].style
+                            .map(_style_sz_order, subset=["Order (Wk)"])
+                            .map(_style_sz_str,   subset=["Order (STR)"])
+                            .format({"Units Sold":"{:,.0f}","Share %":"{:.1f}%",
+                                     "Order (Wk)":"{:,.0f}","Order (STR)":"{:,.0f}"}))
+                        st.dataframe(_ts, width='stretch', hide_index=True)
+                tab_idx += 1
+
+
+# ── Overall Store Distribution (category-level summary) ──────────────────────
+st.markdown('<div class="sec">🏪 Overall Store Distribution</div>', unsafe_allow_html=True)
+st.caption("Total reorder split across stores for the current filters. Per-product store breakdown is inside each product expander above.")
 
 if df_prodstore is None:
     st.info("Store sales data not available. Run `fetch_product_store_sales.py` and set GDRIVE_PRODSTORE_ID.")
