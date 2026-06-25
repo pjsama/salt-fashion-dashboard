@@ -357,7 +357,7 @@ with st.sidebar:
     sel_brand = st.selectbox("Brand", brands)
     brand_df  = df_templates[df_templates["Brand"] == sel_brand]
     cats      = ["All"] + sorted([c for c in brand_df["Category"].unique()
-                                   if c and c not in ("","nan")])
+                                   if c and c not in ("","nan","All","True","False")])
     sel_cat   = st.selectbox("Category", cats)
     filtered_df = brand_df if sel_cat == "All" else brand_df[brand_df["Category"] == sel_cat]
     products    = sorted(filtered_df["Product_Name"].unique())
@@ -407,7 +407,12 @@ def find_variant_rows(df, product_name):
     return df[mask].copy()
 
 p_sizes  = find_variant_rows(size_df,  sel_product)
-p_colors = find_variant_rows(color_df, sel_product)
+# Color: exact match only — fuzzy matching pulls in wrong products
+# e.g. "A-line Green Dress Green" would fuzzy-match any dress with "green"
+if color_df is not None and not color_df.empty:
+    p_colors = color_df[color_df["Product Name"].str.strip() == sel_product.strip()].copy()
+else:
+    p_colors = pd.DataFrame()
 
 if not p_sizes.empty and "Size" in p_sizes.columns:
     p_sizes["_sk"] = p_sizes["Size"].apply(lambda s: SIZE_ORDER.index(s) if s in SIZE_ORDER else 99)
