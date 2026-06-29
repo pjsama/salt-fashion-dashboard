@@ -394,20 +394,23 @@ has_sub = "Sub Category" in prod_sum.columns and prod_sum["Sub Category"].str.st
 cat_grp = ["Category","Sub Category"] if has_sub else ["Category"]
 
 cat_sum = prod_sum.groupby(cat_grp).agg(
-    Products    = ("Product Name","count"),
-    Units_Sold  = ("Total_Sold",  "sum"),
-    In_Stock    = ("Total_Stock", "sum"),
-    Avg_STR     = ("STR_Pct",     "mean"),
-    Order_Wk    = ("Reorder_Wk",  "sum"),
-    Order_STR   = ("Reorder_STR", "sum"),
-    Est_Value   = ("Est_Value",   "sum"),
+    Products    = ("Product Name", "count"),
+    Units_Sold  = ("Total_Sold",   "sum"),
+    In_Stock    = ("Total_Stock",  "sum"),
+    Avg_STR     = ("STR_Pct",      "mean"),
+    Weekly_Rate = ("Weekly_Rate",  "sum"),
+    Order_Wk    = ("Reorder_Wk",   "sum"),
+    Order_STR   = ("Reorder_STR",  "sum"),
+    Est_Value   = ("Est_Value",    "sum"),
 ).reset_index().sort_values(["Category","Order_Wk"], ascending=[True,False])
 
-cat_sum["Avg_STR"]   = cat_sum["Avg_STR"].round(1)
-cat_sum["Est_Value"] = cat_sum["Est_Value"].apply(fmt_npr)
+cat_sum["Avg_STR"]    = cat_sum["Avg_STR"].round(1)
+cat_sum["Weekly_Rate"]= cat_sum["Weekly_Rate"].round(1)
+cat_sum["Est_Value"]  = cat_sum["Est_Value"].apply(fmt_npr)
 cat_sum = cat_sum.rename(columns={
     "Products":"# Products","Units_Sold":"Units Sold","In_Stock":"In Stock",
-    "Avg_STR":"Avg STR %","Order_Wk":f"Order (Wk/{target_weeks}wk)",
+    "Avg_STR":"Avg STR %","Weekly_Rate":"Rate/wk",
+    "Order_Wk":f"Order (Wk/{target_weeks}wk)",
     "Order_STR":"Order (STR)","Est_Value":"Est. Value"
 })
 
@@ -416,8 +419,10 @@ def _cat_style(val):
         return "background-color:#dbeafe;color:#1e40af;font-weight:700"
     return ""
 
-disp_cat_cols = (["Category","Sub Category"] if has_sub else ["Category"]) + \
-    ["# Products","Units Sold","In Stock","Avg STR %",
+# Always show Sub Category if it exists — even if blank for some rows
+disp_cat_cols = ["Category"] + \
+    (["Sub Category"] if has_sub else []) + \
+    ["# Products","Units Sold","In Stock","Avg STR %","Rate/wk",
      f"Order (Wk/{target_weeks}wk)","Order (STR)","Est. Value"]
 disp_cat_cols = [c for c in disp_cat_cols if c in cat_sum.columns]
 
@@ -425,11 +430,88 @@ st.dataframe(
     cat_sum[disp_cat_cols].style
         .map(_cat_style, subset=[f"Order (Wk/{target_weeks}wk)","Order (STR)"])
         .format({"Avg STR %":"{:.1f}%","Units Sold":"{:,.0f}","In Stock":"{:,.0f}",
+                 "Rate/wk":"{:.1f}",
                  f"Order (Wk/{target_weeks}wk)":"{:,.0f}","Order (STR)":"{:,.0f}"}),
     width='stretch', hide_index=True)
-st.caption("Sorted by Category A–Z, then by Order Qty descending within each category")
+st.caption("Sorted by Category A–Z, then by Order Qty descending within each category · Rate/wk = total weekly units across all products in this category")
 
-# ── Product-Level Table ───────────────────────────────────────────────────────
+# ── Size Breakdown by Category ────────────────────────────────────────────────
+st.markdown('<div class="sec">📐 Size Breakdown by Category</div>', unsafe_allow_html=True)
+
+if size_df is None:
+    st.info("Size data not available — run `variant_export.py` first.")
+else:
+    # Filter size_df to current brand + category + sub filters
+    _sz_cat = size_df[size_df["Brand"].str.strip() == sel_brand].copy()
+    _sz_cat = _sz_cat[~_sz_cat["Category"].str.strip().str.lower().isin(JUNK_CATS)]
+    if sel_cat != "All" and "Category" in _sz_cat.columns:
+        _sz_cat = _sz_cat[_sz_cat["Category"].str.strip() == sel_cat]
+    if sel_sub != "All" and "Sub Category" in _sz_cat.columns:
+        _sz_cat = _sz_cat[_sz_cat["Sub Category"].str.strip() == sel_sub]
+    if search.strip():
+        _sz_cat = _sz_cat[_sz_cat["Product Name"].str.contains(search.strip(), case=False, na=False)]
+
+    if _sz_cat.empty:
+        st.info("No size data for current filters.")
+    else:
+        # Aggregate by Category + Sub Category + Size
+        sz_grp = ["Category"]
+        if "Sub Category" in _sz_cat.columns and _sz_cat["Sub Category"].str.strip().ne("").any():
+            sz_grp.append("Sub Category")
+        sz_grp.append("Size")
+
+        sz_cat_agg = _sz_cat.groupby(sz_grp, as_index=False).agg(
+            Units_Sold = ("Units Sold", "sum"),
+            In_Stock   = ("In Stock",   "sum"),
+        )
+        sz_cat_agg["STR %"]    = (sz_cat_agg["Units_Sold"] /
+            (sz_cat_agg["Units_Sold"] + sz_cat_agg["In_Stock"]).replace(0, float("nan")) * 100
+        ).fillna(0).round(1)
+        sz_cat_agg["Reorder"]  = (sz_cat_agg["Units_Sold"] - sz_cat_agg["In_Stock"]).clip(lower=0).round().astype(int)
+
+        # Sort sizes correctly
+        sz_cat_agg["_sk"] = sz_cat_agg["Size"].apply(
+            lambda s: SIZE_ORDER.index(s) if s in SIZE_ORDER else 99)
+        sz_cat_agg = sz_cat_agg.sort_values(
+            sz_grp[:-1] + ["_sk"], ascending=True
+        ).drop(columns=["_sk"])
+
+        sz_cat_agg = sz_cat_agg.rename(columns={
+            "Units_Sold":"Units Sold","In_Stock":"In Stock"})
+
+        def _sz_reorder_style(val):
+            if isinstance(val,(int,float)) and val > 0:
+                return "background-color:#dbeafe;color:#1e40af;font-weight:700"
+            return ""
+        def _sz_stock_style(val):
+            if isinstance(val,(int,float)) and val == 0:
+                return "background-color:#fee2e2;color:#991b1b"
+            return ""
+        def _sz_str_style(val):
+            if not isinstance(val,(int,float)): return ""
+            if val >= 70: return "background-color:#dcfce7;color:#166534"
+            if val >= 30: return "background-color:#fef9c3;color:#854d0e"
+            return "background-color:#fee2e2;color:#991b1b"
+
+        disp_sz_cat = [c for c in sz_grp + ["Units Sold","In Stock","STR %","Reorder"]
+                       if c in sz_cat_agg.columns]
+
+        st.dataframe(
+            sz_cat_agg[disp_sz_cat].style
+                .map(_sz_reorder_style, subset=["Reorder"])
+                .map(_sz_stock_style,   subset=["In Stock"])
+                .map(_sz_str_style,     subset=["STR %"])
+                .format({"Units Sold":"{:,.0f}","In Stock":"{:,.0f}",
+                         "STR %":"{:.1f}%","Reorder":"{:,.0f}"}),
+            width='stretch', hide_index=True)
+        st.caption(
+            f"{len(sz_cat_agg):,} category-size rows · "
+            f"🔵 Reorder = units sold − stock · "
+            f"🔴 Red stock = sold out for that size · "
+            f"Sizes sorted XS→XL / smallest→largest"
+        )
+
+
 st.markdown('<div class="sec">📋 Product-Level Reorder Plan</div>', unsafe_allow_html=True)
 
 show_cols = ["Product Name","Category"] + \
