@@ -466,15 +466,14 @@ cat_sum = prod_sum.groupby(cat_grp).agg(
     Net_Sales     = ("Net_Sales",       "sum"),
     In_Stock      = ("Total_Stock",     "sum"),
     Avg_STR       = ("STR_Pct",         "mean"),
-    Velocity_Day  = ("Daily_Velocity",  "sum"),
-    Weekly_Rate   = ("Weekly_Rate",     "sum"),
     Order_Vel     = ("Reorder_Velocity","sum"),
     Est_Value     = ("Est_Value",       "sum"),
 ).reset_index().sort_values(["Category","Order_Vel"], ascending=[True,False])
 
+# Velocity at category level = total net sales / lookback days (not sum of individual velocities)
+cat_sum["Velocity_Day"] = (cat_sum["Net_Sales"] / velocity_days).round(2)
+cat_sum["Weekly_Rate"]  = (cat_sum["Velocity_Day"] * 7).round(1)
 cat_sum["Avg_STR"]      = cat_sum["Avg_STR"].round(1)
-cat_sum["Weekly_Rate"]  = cat_sum["Weekly_Rate"].round(1)
-cat_sum["Velocity_Day"] = cat_sum["Velocity_Day"].round(2)
 cat_sum["Est_Value"]    = cat_sum["Est_Value"].apply(fmt_npr)
 cat_sum = cat_sum.rename(columns={
     "Products":"# Products","Units_Sold":"Units Sold",
@@ -546,10 +545,9 @@ else:
         sz_cat_agg["STR %"]      = (sz_cat_agg["Units_Sold"] /
             (sz_cat_agg["Units_Sold"] + sz_cat_agg["In_Stock"]).replace(0, float("nan")) * 100
         ).fillna(0).round(1)
-        sz_cat_agg["Reorder"]    = (sz_cat_agg["Units_Sold"] - sz_cat_agg["In_Stock"]).clip(lower=0).round().astype(int)
-        # Weekly rate per size: proportional share of category velocity
-        avg_days = prod_sum["effective_days"].mean() if "effective_days" in prod_sum.columns else velocity_days
-        sz_cat_agg["Rate/wk"] = (sz_cat_agg["Units_Sold"] / avg_days * 7).round(2)
+        sz_cat_agg["Reorder"]  = (sz_cat_agg["Units_Sold"] - sz_cat_agg["In_Stock"]).clip(lower=0).round().astype(int)
+        # Rate/wk = units sold in lookback window / velocity_days * 7
+        sz_cat_agg["Rate/wk"]  = (sz_cat_agg["Units_Sold"] / velocity_days * 7).round(2)
 
         # Sort sizes correctly
         sz_cat_agg["_sk"] = sz_cat_agg["Size"].apply(
