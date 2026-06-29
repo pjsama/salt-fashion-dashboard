@@ -280,7 +280,8 @@ with st.sidebar:
     min_str_pct = st.slider("Min STR % to include", 0, 100, 50,
         help="Only show products at or above this sell-through rate")
     target_weeks = st.slider("Target weeks of cover", 2, 12, 4)
-    show_zero = st.checkbox("Show products with 0 order qty", value=False)
+    show_zero = st.checkbox("Show products with no sales", value=False,
+        help="When unchecked, hides products with zero all-time sales. Products with stock but low recent velocity are always shown.")
 
     st.markdown("---")
     st.markdown("**📈 Velocity Settings**")
@@ -413,7 +414,9 @@ prod_sum["Est_Value"]   = prod_sum["Reorder_Velocity"] * prod_sum["Avg_Price"]
 # Apply STR filter
 prod_sum = prod_sum[prod_sum["STR_Pct"] >= min_str_pct]
 if not show_zero:
-    prod_sum = prod_sum[prod_sum["Reorder_Velocity"] > 0]
+    # Only hide products with zero sales entirely — keep well-stocked products
+    # (a product with stock > cover target has Reorder=0 but is still relevant)
+    prod_sum = prod_sum[prod_sum["Total_Sold"] > 0]
 
 prod_sum = prod_sum.sort_values("Total_Sold", ascending=False)
 
