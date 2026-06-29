@@ -370,33 +370,43 @@ else:
 has_recent = "Recent Sold 60d" in bdf.columns
 
 if has_recent:
-    # Use actual recent sales from export — true velocity, no assumptions needed
     recent_60 = bdf.groupby(grp_cols).agg(
         Recent_60 = ("Recent Sold 60d", "sum"),
     ).reset_index()
     prod_sum = prod_sum.merge(recent_60, on=grp_cols, how="left")
     prod_sum["Recent_60"] = prod_sum["Recent_60"].fillna(0)
 
-    # Velocity = recent units / velocity_days (slider still controls the window label)
-    # effective_days for recent data is always 60 (that's what the export captured)
-    prod_sum["effective_days"] = velocity_days  # for display consistency
-    prod_sum["Daily_Velocity"] = (prod_sum["Recent_60"] / 60).round(4)
-    prod_sum["Weekly_Rate"]    = (prod_sum["Daily_Velocity"] * 7).round(2)
-    st.sidebar.success(f"✅ Using Recent Sold 60d for velocity")
+    # Fallback: if recent = 0 but product has lifetime sales, use lifetime velocity
+    # (avoids filtering out valid products that just had a slow recent period)
+    prod_sum["effective_days"] = velocity_days
+    prod_sum["_lifetime_vel"]  = (prod_sum["Total_Sold"] /
+        prod_sum["days_live"].clip(upper=velocity_days).clip(lower=7)).round(4)
+    prod_sum["Daily_Velocity"] = prod_sum.apply(
+        lambda r: r["Recent_60"] / 60 if r["Recent_60"] > 0
+                  else r["_lifetime_vel"],
+        axis=1).round(4)
+    prod_sum["Weekly_Rate"]   = (prod_sum["Daily_Velocity"] * 7).round(2)
+    prod_sum["_using_recent"] = prod_sum["Recent_60"] > 0
+    n_recent = prod_sum["_using_recent"].sum()
+    n_fallback = (~prod_sum["_using_recent"]).sum()
+    st.sidebar.success(
+        f"✅ Recent Sold 60d: {n_recent} products · "
+        f"{n_fallback} using lifetime fallback")
 else:
-    # Fallback: all-time sales / min(days_live, velocity_days)
     prod_sum["effective_days"] = prod_sum["days_live"].clip(upper=velocity_days).clip(lower=7)
     prod_sum["Daily_Velocity"] = (prod_sum["Total_Sold"] / prod_sum["effective_days"]).round(4)
     prod_sum["Weekly_Rate"]    = (prod_sum["Daily_Velocity"] * 7).round(2)
     st.sidebar.warning(
-        f"⚠️ Using all-time sales for velocity — re-export products to get Recent Sold 60d column")
+        "⚠️ Using all-time sales for velocity — re-export products to get Recent Sold 60d")
 
 prod_sum["Reorder_Velocity"] = (
     prod_sum["Daily_Velocity"] * cover_days - prod_sum["Total_Stock"]
 ).clip(lower=0).round().astype(int)
 
 # STR restore removed — replaced by Net Sales and Sales Velocity
-prod_sum["Net_Sales"]   = prod_sum.get("Recent_60", prod_sum["Total_Sold"])  # recent sales if available
+prod_sum["Net_Sales"] = (prod_sum["Recent_60"]
+                         if "Recent_60" in prod_sum.columns
+                         else prod_sum["Total_Sold"])
 prod_sum["weeks_live"]  = (prod_sum["days_live"] / 7).clip(lower=1)
 prod_sum["Est_Value"]   = prod_sum["Reorder_Velocity"] * prod_sum["Avg_Price"]
 
