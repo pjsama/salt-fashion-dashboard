@@ -355,37 +355,44 @@ prod_sum["STR_Pct"]    = (prod_sum["Total_Sold"] /
 prod_sum["STR_Status"] = prod_sum["STR_Pct"].apply(str_status)
 prod_sum["Season"]     = prod_sum["Category"].apply(cat_season)
 
-# Weekly rate from create date (lifetime)
+# ── Velocity-based reorder ────────────────────────────────────────────────────
+# daily_velocity = Total_Sold / effective_days
+#   effective_days = min(days_live, velocity_days)
+#   — new products (days_live < velocity_days): use actual days (higher velocity)
+#   — old products (days_live > velocity_days): cap at lookback window
+#
+# Reorder = max(0, daily_velocity × cover_days − stock)
+#
+# NOTE: STR restore = Total_Sold − stock (always)
+#       Velocity reorder differs because:
+#         - Old product selling slowly recently → velocity < lifetime avg → smaller reorder
+#         - New product selling fast → velocity > lifetime avg → larger reorder
+#         - When cover_days = velocity_days they differ only for new products
+
 if "Create Date" in bdf.columns:
     dates = bdf.groupby("Product Name")["Create Date"].min().reset_index()
     dates["Create Date"] = pd.to_datetime(dates["Create Date"], errors="coerce")
     prod_sum = prod_sum.merge(dates, on="Product Name", how="left")
-    prod_sum["days_live"] = ((today - prod_sum["Create Date"]).dt.days).fillna(180).clip(lower=velocity_days)
+    # days_live = actual days since product launch, minimum 7
+    prod_sum["days_live"] = ((today - prod_sum["Create Date"]).dt.days).fillna(365).clip(lower=7)
 else:
-    prod_sum["days_live"] = 180
+    prod_sum["days_live"] = 365
 
-# ── Velocity-based reorder (Option 1: recent lookback) ───────────────────────
-# daily_velocity = Total_Sold / effective_days
 # effective_days = min(days_live, velocity_days)
-# — products newer than the window use their actual lifetime (can't look back further)
-# — older products: we assume recent period = velocity_days days
-# Reorder = max(0, daily_velocity × cover_days − current_stock)
-
-prod_sum["effective_days"] = prod_sum["days_live"].clip(upper=velocity_days)
-prod_sum["Daily_Velocity"] = (prod_sum["Total_Sold"] / prod_sum["effective_days"]).round(3)
+# For new products: effective_days = days_live (can't look back further than launch)
+# For old products: effective_days = velocity_days (look at recent window only)
+prod_sum["effective_days"] = prod_sum["days_live"].clip(upper=velocity_days).clip(lower=7)
+prod_sum["Daily_Velocity"] = (prod_sum["Total_Sold"] / prod_sum["effective_days"]).round(4)
 prod_sum["Weekly_Rate"]    = (prod_sum["Daily_Velocity"] * 7).round(2)
 
-# Velocity reorder (new formula)
 prod_sum["Reorder_Velocity"] = (
     prod_sum["Daily_Velocity"] * cover_days - prod_sum["Total_Stock"]
 ).clip(lower=0).round().astype(int)
 
-# Legacy formulas kept for reference columns
-prod_sum["weeks_live"]   = (prod_sum["days_live"] / 7).clip(lower=4)
-prod_sum["Target_Stock"] = (prod_sum["Weekly_Rate"] * target_weeks).round(0)
-prod_sum["Reorder_Wk"]   = (prod_sum["Target_Stock"] - prod_sum["Total_Stock"]).clip(lower=0).round().astype(int)
-prod_sum["Reorder_STR"]  = (prod_sum["Total_Sold"]   - prod_sum["Total_Stock"]).clip(lower=0).round().astype(int)
-prod_sum["Est_Value"]    = prod_sum["Reorder_Velocity"] * prod_sum["Avg_Price"]
+# STR restore = simply units sold − stock (restore original level)
+prod_sum["weeks_live"]  = (prod_sum["days_live"] / 7).clip(lower=1)
+prod_sum["Reorder_STR"] = (prod_sum["Total_Sold"] - prod_sum["Total_Stock"]).clip(lower=0).round().astype(int)
+prod_sum["Est_Value"]   = prod_sum["Reorder_Velocity"] * prod_sum["Avg_Price"]
 
 # Apply STR filter
 prod_sum = prod_sum[prod_sum["STR_Pct"] >= min_str_pct]
