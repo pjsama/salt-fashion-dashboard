@@ -377,32 +377,38 @@ if has_recent:
     prod_sum = prod_sum.merge(recent_60, on=grp_cols, how="left")
     prod_sum["Recent_60"] = prod_sum["Recent_60"].fillna(0)
 
-    # Fallback: if recent = 0 but product has lifetime sales, use lifetime velocity
-    # (avoids filtering out valid products that just had a slow recent period)
+    # Velocity for DISPLAY: use recent if available, lifetime as fallback (for Rate/wk col)
     prod_sum["effective_days"] = velocity_days
     prod_sum["_lifetime_vel"]  = (prod_sum["Total_Sold"] /
-        prod_sum["days_live"].clip(upper=velocity_days).clip(lower=7)).round(4)
+        prod_sum["days_live"].clip(upper=365).clip(lower=7)).round(4)
     prod_sum["Daily_Velocity"] = prod_sum.apply(
         lambda r: r["Recent_60"] / 60 if r["Recent_60"] > 0
                   else r["_lifetime_vel"],
         axis=1).round(4)
-    prod_sum["Weekly_Rate"]   = (prod_sum["Daily_Velocity"] * 7).round(2)
+    prod_sum["Weekly_Rate"]    = (prod_sum["Daily_Velocity"] * 7).round(2)
+
+    # Reorder: ONLY use recent velocity — if no recent sales, reorder = 0
+    # Lifetime fallback inflates reorder for slow-moving products incorrectly
+    prod_sum["_recent_velocity"] = (prod_sum["Recent_60"] / 60).round(4)
+    prod_sum["Reorder_Velocity"] = (
+        prod_sum["_recent_velocity"] * cover_days - prod_sum["Total_Stock"]
+    ).clip(lower=0).round().astype(int)
+
     prod_sum["_using_recent"] = prod_sum["Recent_60"] > 0
-    n_recent = prod_sum["_using_recent"].sum()
+    n_recent   = prod_sum["_using_recent"].sum()
     n_fallback = (~prod_sum["_using_recent"]).sum()
     st.sidebar.success(
-        f"✅ Recent Sold 60d: {n_recent} products · "
-        f"{n_fallback} using lifetime fallback")
+        f"✅ Recent Sold 60d: {n_recent} products with recent sales · "
+        f"{n_fallback} shown with 0 reorder (no recent sales)")
 else:
-    prod_sum["effective_days"] = prod_sum["days_live"].clip(upper=velocity_days).clip(lower=7)
-    prod_sum["Daily_Velocity"] = (prod_sum["Total_Sold"] / prod_sum["effective_days"]).round(4)
-    prod_sum["Weekly_Rate"]    = (prod_sum["Daily_Velocity"] * 7).round(2)
+    prod_sum["effective_days"]   = prod_sum["days_live"].clip(upper=velocity_days).clip(lower=7)
+    prod_sum["Daily_Velocity"]   = (prod_sum["Total_Sold"] / prod_sum["effective_days"]).round(4)
+    prod_sum["Weekly_Rate"]      = (prod_sum["Daily_Velocity"] * 7).round(2)
+    prod_sum["Reorder_Velocity"] = (
+        prod_sum["Daily_Velocity"] * cover_days - prod_sum["Total_Stock"]
+    ).clip(lower=0).round().astype(int)
     st.sidebar.warning(
         "⚠️ Using all-time sales for velocity — re-export products to get Recent Sold 60d")
-
-prod_sum["Reorder_Velocity"] = (
-    prod_sum["Daily_Velocity"] * cover_days - prod_sum["Total_Stock"]
-).clip(lower=0).round().astype(int)
 
 # STR restore removed — replaced by Net Sales and Sales Velocity
 prod_sum["Net_Sales"] = (prod_sum["Recent_60"]
