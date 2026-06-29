@@ -356,9 +356,24 @@ prod_sum["STR_Pct"]    = (prod_sum["Total_Sold"] /
 prod_sum["STR_Status"] = prod_sum["STR_Pct"].apply(str_status)
 prod_sum["Season"]     = prod_sum["Category"].apply(cat_season)
 
-# ── Velocity-based reorder ────────────────────────────────────────────────────
-# Use "Recent Sold 60d" from export if available — gives true recent velocity.
-# Falls back to all-time total / days_live if recent column not in export.
+# ── Velocity-based reorder — three-tier logic ─────────────────────────────────
+#
+# Tier 1 — No recent sales (Recent_60 = 0):
+#   → Reorder = 0. No current demand signal. Show product but don't order.
+#
+# Tier 2 — New product (days_live < 90):
+#   → Use recent velocity only (limited history, recent is most reliable)
+#   → velocity = Recent_60 / 60
+#
+# Tier 3 — Established product (days_live ≥ 90, has recent sales):
+#   → Use min(recent, lifetime) — conservative, avoids over-ordering
+#   → If trend is dying: recent < lifetime → use recent (smaller order)
+#   → If trending up: recent > lifetime → still limited by lifetime (safer)
+#   → velocity = min(Recent_60/60, Total_Sold/days_live)
+#
+# Display velocity (Rate/wk) always shows recent when available,
+# lifetime fallback when Recent_60 = 0.
+# ─────────────────────────────────────────────────────────────────────────────
 
 if "Create Date" in bdf.columns:
     dates = bdf.groupby("Product Name")["Create Date"].min().reset_index()
@@ -370,6 +385,8 @@ else:
 
 has_recent = "Recent Sold 60d" in bdf.columns
 
+NEW_PRODUCT_DAYS = 90  # threshold for Tier 2 vs Tier 3
+
 if has_recent:
     recent_60 = bdf.groupby(grp_cols).agg(
         Recent_60 = ("Recent Sold 60d", "sum"),
@@ -377,29 +394,47 @@ if has_recent:
     prod_sum = prod_sum.merge(recent_60, on=grp_cols, how="left")
     prod_sum["Recent_60"] = prod_sum["Recent_60"].fillna(0)
 
-    # Velocity for DISPLAY: use recent if available, lifetime as fallback (for Rate/wk col)
-    prod_sum["effective_days"] = velocity_days
-    prod_sum["_lifetime_vel"]  = (prod_sum["Total_Sold"] /
+    prod_sum["_recent_vel"]   = (prod_sum["Recent_60"] / 60).round(4)
+    prod_sum["_lifetime_vel"] = (prod_sum["Total_Sold"] /
         prod_sum["days_live"].clip(upper=365).clip(lower=7)).round(4)
-    prod_sum["Daily_Velocity"] = prod_sum.apply(
-        lambda r: r["Recent_60"] / 60 if r["Recent_60"] > 0
-                  else r["_lifetime_vel"],
-        axis=1).round(4)
-    prod_sum["Weekly_Rate"]    = (prod_sum["Daily_Velocity"] * 7).round(2)
 
-    # Reorder: ONLY use recent velocity — if no recent sales, reorder = 0
-    # Lifetime fallback inflates reorder for slow-moving products incorrectly
-    prod_sum["_recent_velocity"] = (prod_sum["Recent_60"] / 60).round(4)
+    def _calc_velocity(r):
+        if r["Recent_60"] == 0:
+            # Tier 1 — no current demand
+            return r["_lifetime_vel"]   # display only; reorder will be 0
+        elif r["days_live"] < NEW_PRODUCT_DAYS:
+            # Tier 2 — new product, use recent only
+            return r["_recent_vel"]
+        else:
+            # Tier 3 — established, use conservative min
+            return min(r["_recent_vel"], r["_lifetime_vel"])
+
+    def _calc_reorder_vel(r):
+        if r["Recent_60"] == 0:
+            return 0.0  # Tier 1 — no reorder without demand signal
+        elif r["days_live"] < NEW_PRODUCT_DAYS:
+            return r["_recent_vel"]     # Tier 2
+        else:
+            return min(r["_recent_vel"], r["_lifetime_vel"])  # Tier 3
+
+    prod_sum["Daily_Velocity"]    = prod_sum.apply(_calc_velocity,     axis=1).round(4)
+    prod_sum["_reorder_vel_daily"]= prod_sum.apply(_calc_reorder_vel,  axis=1).round(4)
+    prod_sum["Weekly_Rate"]       = (prod_sum["Daily_Velocity"] * 7).round(2)
+    prod_sum["effective_days"]    = velocity_days
+
     prod_sum["Reorder_Velocity"] = (
-        prod_sum["_recent_velocity"] * cover_days - prod_sum["Total_Stock"]
+        prod_sum["_reorder_vel_daily"] * cover_days - prod_sum["Total_Stock"]
     ).clip(lower=0).round().astype(int)
 
-    prod_sum["_using_recent"] = prod_sum["Recent_60"] > 0
-    n_recent   = prod_sum["_using_recent"].sum()
-    n_fallback = (~prod_sum["_using_recent"]).sum()
+    # Tier counts for sidebar info
+    t1 = (prod_sum["Recent_60"] == 0).sum()
+    t2 = ((prod_sum["Recent_60"] > 0) & (prod_sum["days_live"] < NEW_PRODUCT_DAYS)).sum()
+    t3 = ((prod_sum["Recent_60"] > 0) & (prod_sum["days_live"] >= NEW_PRODUCT_DAYS)).sum()
     st.sidebar.success(
-        f"✅ Recent Sold 60d: {n_recent} products with recent sales · "
-        f"{n_fallback} shown with 0 reorder (no recent sales)")
+        f"✅ Velocity tiers:\n"
+        f"- {t3} established (min recent/lifetime)\n"
+        f"- {t2} new <{NEW_PRODUCT_DAYS}d (recent only)\n"
+        f"- {t1} no recent sales (reorder=0)")
 else:
     prod_sum["effective_days"]   = prod_sum["days_live"].clip(upper=velocity_days).clip(lower=7)
     prod_sum["Daily_Velocity"]   = (prod_sum["Total_Sold"] / prod_sum["effective_days"]).round(4)
@@ -410,7 +445,20 @@ else:
     st.sidebar.warning(
         "⚠️ Using all-time sales for velocity — re-export products to get Recent Sold 60d")
 
-# STR restore removed — replaced by Net Sales and Sales Velocity
+
+# Velocity tier label for product table
+if has_recent:
+    def _tier_label(r):
+        if r["Recent_60"] == 0:         return "🔴 No demand"
+        if r["days_live"] < NEW_PRODUCT_DAYS: return "🆕 New (<90d)"
+        rv = r["_recent_vel"]; lv = r["_lifetime_vel"]
+        if rv < lv * 0.8:               return "📉 Slowing"
+        if rv > lv * 1.2:               return "📈 Trending"
+        return "✅ Stable"
+    prod_sum["Vel_Tier"] = prod_sum.apply(_tier_label, axis=1)
+else:
+    prod_sum["Vel_Tier"] = "—"
+
 prod_sum["Net_Sales"] = (prod_sum["Recent_60"]
                          if "Recent_60" in prod_sum.columns
                          else prod_sum["Total_Sold"])
@@ -605,14 +653,15 @@ st.markdown('<div class="sec">📋 Product-Level Reorder Plan</div>', unsafe_all
 show_cols = ["Product Name","Category"] + \
     (["Sub Category"] if has_sub else []) + \
     ["STR_Status","STR_Pct","Total_Sold","Net_Sales",
-     "Daily_Velocity","Weekly_Rate","Total_Stock",
+     "Daily_Velocity","Weekly_Rate","Vel_Tier","Total_Stock",
      "Reorder_Velocity","Avg_Price","Est_Value"]
 show_cols = [c for c in show_cols if c in prod_sum.columns]
 
 disp = prod_sum[show_cols].copy().rename(columns={
     "STR_Status":"Status","STR_Pct":"STR %","Total_Sold":"Units Sold",
     "Net_Sales":net_lbl,"Daily_Velocity":"Velocity (u/day)",
-    "Weekly_Rate":"Rate/wk","Total_Stock":"In Stock",
+    "Weekly_Rate":"Rate/wk","Vel_Tier":"Trend",
+    "Total_Stock":"In Stock",
     "Reorder_Velocity":f"Order ({cover_days}d)",
     "Avg_Price":"Avg Price","Est_Value":"Est. Value"
 })
