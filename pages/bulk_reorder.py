@@ -546,8 +546,10 @@ else:
             (sz_cat_agg["Units_Sold"] + sz_cat_agg["In_Stock"]).replace(0, float("nan")) * 100
         ).fillna(0).round(1)
         sz_cat_agg["Reorder"]  = (sz_cat_agg["Units_Sold"] - sz_cat_agg["In_Stock"]).clip(lower=0).round().astype(int)
-        # Rate/wk = units sold in lookback window / velocity_days * 7
-        sz_cat_agg["Rate/wk"]  = (sz_cat_agg["Units_Sold"] / velocity_days * 7).round(2)
+        # Rate/wk: use avg days_live from prod_sum (lifetime, not recent window)
+        # size_df has no recent sales data — lifetime rate is the honest number
+        avg_days_live = prod_sum["days_live"].mean() if "days_live" in prod_sum.columns else 365
+        sz_cat_agg["Rate/wk (lifetime)"] = (sz_cat_agg["Units_Sold"] / max(avg_days_live, 1) * 7).round(2)
 
         # Sort sizes correctly
         sz_cat_agg["_sk"] = sz_cat_agg["Size"].apply(
@@ -573,7 +575,7 @@ else:
             if val >= 30: return "background-color:#fef9c3;color:#854d0e"
             return "background-color:#fee2e2;color:#991b1b"
 
-        disp_sz_cat = [c for c in sz_grp + ["Units Sold","In Stock","STR %","Rate/wk","Reorder"]
+        disp_sz_cat = [c for c in sz_grp + ["Units Sold","In Stock","STR %","Rate/wk (lifetime)","Reorder"]
                        if c in sz_cat_agg.columns]
 
         st.dataframe(
@@ -582,13 +584,13 @@ else:
                 .map(_sz_stock_style,   subset=["In Stock"])
                 .map(_sz_str_style,     subset=["STR %"])
                 .format({"Units Sold":"{:,.0f}","In Stock":"{:,.0f}",
-                         "STR %":"{:.1f}%","Rate/wk":"{:.2f}","Reorder":"{:,.0f}"}),
+                         "STR %":"{:.1f}%","Rate/wk (lifetime)":"{:.2f}","Reorder":"{:,.0f}"}),
             width='stretch', hide_index=True)
         st.caption(
             f"{len(sz_cat_agg):,} category-size rows · "
-            f"🔵 Reorder = units sold − stock · "
-            f"🔴 Red stock = sold out for that size · "
-            f"Sizes sorted XS→XL / smallest→largest"
+            f"🔵 Reorder = units sold − stock (STR restore) · "
+            f"🔴 Red stock = sold out · "
+            f"Rate/wk = lifetime average rate"
         )
 
 
