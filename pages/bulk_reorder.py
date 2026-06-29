@@ -283,6 +283,26 @@ with st.sidebar:
     show_zero = st.checkbox("Show products with 0 order qty", value=False)
 
     st.markdown("---")
+    st.markdown("**📈 Velocity Settings**")
+    velocity_days = st.slider(
+        "Sales lookback window (days)", 30, 180, 60,
+        step=15,
+        help=(
+            "Sets the window for calculating daily sell rate.\n\n"
+            "**30d** = recent momentum (aggressive — good mid-season)\n"
+            "**60d** = balanced (recommended)\n"
+            "**90d** = smoothed average (conservative)\n\n"
+            "Products newer than this window use their full lifetime.\n"
+            "Reorder = velocity × 60 days − current stock."
+        )
+    )
+    cover_days = st.slider(
+        "Days of cover to reorder for", 30, 120, 60,
+        step=15,
+        help="How many days of stock to reorder. velocity × cover_days − stock = reorder qty"
+    )
+
+    st.markdown("---")
     st.markdown("**📅 Date Added Filter**")
     date_opts = ["All time","Last 30 days","Last 60 days","Last 90 days",
                  "Older than 30 days","Older than 60 days","Older than 90 days"]
@@ -335,29 +355,46 @@ prod_sum["STR_Pct"]    = (prod_sum["Total_Sold"] /
 prod_sum["STR_Status"] = prod_sum["STR_Pct"].apply(str_status)
 prod_sum["Season"]     = prod_sum["Category"].apply(cat_season)
 
-# Weekly rate from create date
+# Weekly rate from create date (lifetime)
 if "Create Date" in bdf.columns:
     dates = bdf.groupby("Product Name")["Create Date"].min().reset_index()
     dates["Create Date"] = pd.to_datetime(dates["Create Date"], errors="coerce")
     prod_sum = prod_sum.merge(dates, on="Product Name", how="left")
-    prod_sum["weeks_live"] = ((today - prod_sum["Create Date"]).dt.days / 7).fillna(52).clip(lower=4)
+    prod_sum["days_live"] = ((today - prod_sum["Create Date"]).dt.days).fillna(180).clip(lower=velocity_days)
 else:
-    prod_sum["weeks_live"] = 52
+    prod_sum["days_live"] = 180
 
-prod_sum["Weekly_Rate"]  = (prod_sum["Total_Sold"] / prod_sum["weeks_live"]).round(2)
+# ── Velocity-based reorder (Option 1: recent lookback) ───────────────────────
+# daily_velocity = Total_Sold / effective_days
+# effective_days = min(days_live, velocity_days)
+# — products newer than the window use their actual lifetime (can't look back further)
+# — older products: we assume recent period = velocity_days days
+# Reorder = max(0, daily_velocity × cover_days − current_stock)
+
+prod_sum["effective_days"] = prod_sum["days_live"].clip(upper=velocity_days)
+prod_sum["Daily_Velocity"] = (prod_sum["Total_Sold"] / prod_sum["effective_days"]).round(3)
+prod_sum["Weekly_Rate"]    = (prod_sum["Daily_Velocity"] * 7).round(2)
+
+# Velocity reorder (new formula)
+prod_sum["Reorder_Velocity"] = (
+    prod_sum["Daily_Velocity"] * cover_days - prod_sum["Total_Stock"]
+).clip(lower=0).round().astype(int)
+
+# Legacy formulas kept for reference columns
+prod_sum["weeks_live"]   = (prod_sum["days_live"] / 7).clip(lower=4)
 prod_sum["Target_Stock"] = (prod_sum["Weekly_Rate"] * target_weeks).round(0)
 prod_sum["Reorder_Wk"]   = (prod_sum["Target_Stock"] - prod_sum["Total_Stock"]).clip(lower=0).round().astype(int)
 prod_sum["Reorder_STR"]  = (prod_sum["Total_Sold"]   - prod_sum["Total_Stock"]).clip(lower=0).round().astype(int)
-prod_sum["Est_Value"]    = prod_sum["Reorder_Wk"] * prod_sum["Avg_Price"]
+prod_sum["Est_Value"]    = prod_sum["Reorder_Velocity"] * prod_sum["Avg_Price"]
 
 # Apply STR filter
 prod_sum = prod_sum[prod_sum["STR_Pct"] >= min_str_pct]
 if not show_zero:
-    prod_sum = prod_sum[(prod_sum["Reorder_Wk"] > 0) | (prod_sum["Reorder_STR"] > 0)]
+    prod_sum = prod_sum[prod_sum["Reorder_Velocity"] > 0]
 
 prod_sum = prod_sum.sort_values("Total_Sold", ascending=False)
 
-total_units_wk  = int(prod_sum["Reorder_Wk"].sum())
+total_units_vel = int(prod_sum["Reorder_Velocity"].sum())
 total_units_str = int(prod_sum["Reorder_STR"].sum())
 total_value     = prod_sum["Est_Value"].sum()
 n_products      = len(prod_sum)
@@ -370,16 +407,18 @@ if sel_sub != "All": filter_parts.append(sel_sub)
 if search.strip(): filter_parts.append(f'"{search}"')
 filter_parts.append(sel_season_raw)
 if sel_date != "All time": filter_parts.append(sel_date)
-st.markdown(f"**{'  ·  '.join(filter_parts)}** · STR ≥ {min_str_pct}% · {target_weeks}-week target · {today.strftime('%b %d, %Y')}")
+st.markdown(
+    f"**{'  ·  '.join(filter_parts)}** · STR ≥ {min_str_pct}% · "
+    f"Velocity {velocity_days}d lookback · {cover_days}d cover · {today.strftime('%b %d, %Y')}")
 
 # ── KPIs ──────────────────────────────────────────────────────────────────────
 c1,c2,c3,c4,c5 = st.columns(5)
 for col, val, lbl, clr in [
-    (c1, f"{n_products:,}",            "Products",               "#374151"),
-    (c2, f"{fast_count:,}",            "Fast / Super Fast",      "#16a34a"),
-    (c3, f"{total_units_wk:,}",        f"Order Qty (Wk/{target_weeks}wk)", "#1d4ed8"),
-    (c4, f"{total_units_str:,}",       "Order Qty (STR restore)","#7c3aed"),
-    (c5, fmt_npr(total_value),         "Est. Value (Wk)",        "#374151"),
+    (c1, f"{n_products:,}",          "Products",                         "#374151"),
+    (c2, f"{fast_count:,}",          "Fast / Super Fast",                "#16a34a"),
+    (c3, f"{total_units_vel:,}",     f"Order Qty (Velocity/{cover_days}d)","#1d4ed8"),
+    (c4, f"{total_units_str:,}",     "Order Qty (STR restore)",          "#7c3aed"),
+    (c5, fmt_npr(total_value),       "Est. Value",                       "#374151"),
 ]:
     with col:
         st.markdown(f'<div class="kpi"><p class="kpi-val" style="color:{clr}">{val}</p>'
@@ -394,15 +433,15 @@ has_sub = "Sub Category" in prod_sum.columns and prod_sum["Sub Category"].str.st
 cat_grp = ["Category","Sub Category"] if has_sub else ["Category"]
 
 cat_sum = prod_sum.groupby(cat_grp).agg(
-    Products    = ("Product Name", "count"),
-    Units_Sold  = ("Total_Sold",   "sum"),
-    In_Stock    = ("Total_Stock",  "sum"),
-    Avg_STR     = ("STR_Pct",      "mean"),
-    Weekly_Rate = ("Weekly_Rate",  "sum"),
-    Order_Wk    = ("Reorder_Wk",   "sum"),
-    Order_STR   = ("Reorder_STR",  "sum"),
-    Est_Value   = ("Est_Value",    "sum"),
-).reset_index().sort_values(["Category","Order_Wk"], ascending=[True,False])
+    Products     = ("Product Name",    "count"),
+    Units_Sold   = ("Total_Sold",      "sum"),
+    In_Stock     = ("Total_Stock",     "sum"),
+    Avg_STR      = ("STR_Pct",         "mean"),
+    Weekly_Rate  = ("Weekly_Rate",     "sum"),
+    Order_Vel    = ("Reorder_Velocity","sum"),
+    Order_STR    = ("Reorder_STR",     "sum"),
+    Est_Value    = ("Est_Value",       "sum"),
+).reset_index().sort_values(["Category","Order_Vel"], ascending=[True,False])
 
 cat_sum["Avg_STR"]    = cat_sum["Avg_STR"].round(1)
 cat_sum["Weekly_Rate"]= cat_sum["Weekly_Rate"].round(1)
@@ -410,7 +449,7 @@ cat_sum["Est_Value"]  = cat_sum["Est_Value"].apply(fmt_npr)
 cat_sum = cat_sum.rename(columns={
     "Products":"# Products","Units_Sold":"Units Sold","In_Stock":"In Stock",
     "Avg_STR":"Avg STR %","Weekly_Rate":"Rate/wk",
-    "Order_Wk":f"Order (Wk/{target_weeks}wk)",
+    "Order_Vel":f"Order ({cover_days}d vel)",
     "Order_STR":"Order (STR)","Est_Value":"Est. Value"
 })
 
@@ -419,21 +458,24 @@ def _cat_style(val):
         return "background-color:#dbeafe;color:#1e40af;font-weight:700"
     return ""
 
-# Always show Sub Category if it exists — even if blank for some rows
 disp_cat_cols = ["Category"] + \
     (["Sub Category"] if has_sub else []) + \
     ["# Products","Units Sold","In Stock","Avg STR %","Rate/wk",
-     f"Order (Wk/{target_weeks}wk)","Order (STR)","Est. Value"]
+     f"Order ({cover_days}d vel)","Order (STR)","Est. Value"]
 disp_cat_cols = [c for c in disp_cat_cols if c in cat_sum.columns]
 
 st.dataframe(
     cat_sum[disp_cat_cols].style
-        .map(_cat_style, subset=[f"Order (Wk/{target_weeks}wk)","Order (STR)"])
+        .map(_cat_style, subset=[f"Order ({cover_days}d vel)","Order (STR)"])
         .format({"Avg STR %":"{:.1f}%","Units Sold":"{:,.0f}","In Stock":"{:,.0f}",
                  "Rate/wk":"{:.1f}",
-                 f"Order (Wk/{target_weeks}wk)":"{:,.0f}","Order (STR)":"{:,.0f}"}),
+                 f"Order ({cover_days}d vel)":"{:,.0f}","Order (STR)":"{:,.0f}"}),
     width='stretch', hide_index=True)
-st.caption("Sorted by Category A–Z, then by Order Qty descending within each category · Rate/wk = total weekly units across all products in this category")
+st.caption(
+    f"Sorted by Category A–Z · "
+    f"**Order ({cover_days}d vel)** = daily velocity × {cover_days} days − stock · "
+    f"Velocity window = last {velocity_days} days · Rate/wk = weekly units"
+)
 
 # ── Size Breakdown by Category ────────────────────────────────────────────────
 st.markdown('<div class="sec">📐 Size Breakdown by Category</div>', unsafe_allow_html=True)
@@ -464,10 +506,13 @@ else:
             Units_Sold = ("Units Sold", "sum"),
             In_Stock   = ("In Stock",   "sum"),
         )
-        sz_cat_agg["STR %"]    = (sz_cat_agg["Units_Sold"] /
+        sz_cat_agg["STR %"]      = (sz_cat_agg["Units_Sold"] /
             (sz_cat_agg["Units_Sold"] + sz_cat_agg["In_Stock"]).replace(0, float("nan")) * 100
         ).fillna(0).round(1)
-        sz_cat_agg["Reorder"]  = (sz_cat_agg["Units_Sold"] - sz_cat_agg["In_Stock"]).clip(lower=0).round().astype(int)
+        sz_cat_agg["Reorder"]    = (sz_cat_agg["Units_Sold"] - sz_cat_agg["In_Stock"]).clip(lower=0).round().astype(int)
+        # Weekly rate per size: proportional share of category velocity
+        avg_days = prod_sum["effective_days"].mean() if "effective_days" in prod_sum.columns else velocity_days
+        sz_cat_agg["Rate/wk"] = (sz_cat_agg["Units_Sold"] / avg_days * 7).round(2)
 
         # Sort sizes correctly
         sz_cat_agg["_sk"] = sz_cat_agg["Size"].apply(
@@ -493,7 +538,7 @@ else:
             if val >= 30: return "background-color:#fef9c3;color:#854d0e"
             return "background-color:#fee2e2;color:#991b1b"
 
-        disp_sz_cat = [c for c in sz_grp + ["Units Sold","In Stock","STR %","Reorder"]
+        disp_sz_cat = [c for c in sz_grp + ["Units Sold","In Stock","STR %","Rate/wk","Reorder"]
                        if c in sz_cat_agg.columns]
 
         st.dataframe(
@@ -502,7 +547,7 @@ else:
                 .map(_sz_stock_style,   subset=["In Stock"])
                 .map(_sz_str_style,     subset=["STR %"])
                 .format({"Units Sold":"{:,.0f}","In Stock":"{:,.0f}",
-                         "STR %":"{:.1f}%","Reorder":"{:,.0f}"}),
+                         "STR %":"{:.1f}%","Rate/wk":"{:.2f}","Reorder":"{:,.0f}"}),
             width='stretch', hide_index=True)
         st.caption(
             f"{len(sz_cat_agg):,} category-size rows · "
@@ -517,13 +562,14 @@ st.markdown('<div class="sec">📋 Product-Level Reorder Plan</div>', unsafe_all
 show_cols = ["Product Name","Category"] + \
     (["Sub Category"] if has_sub else []) + \
     ["STR_Status","STR_Pct","Total_Sold","Total_Stock",
-     "Weekly_Rate","Reorder_Wk","Reorder_STR","Avg_Price","Est_Value"]
+     "Weekly_Rate","Reorder_Velocity","Reorder_STR","Avg_Price","Est_Value"]
 show_cols = [c for c in show_cols if c in prod_sum.columns]
 
 disp = prod_sum[show_cols].copy().rename(columns={
     "STR_Status":"Status","STR_Pct":"STR %","Total_Sold":"Units Sold",
     "Total_Stock":"In Stock","Weekly_Rate":"Rate/wk",
-    "Reorder_Wk":"Order (Wk)","Reorder_STR":"Order (STR)",
+    "Reorder_Velocity":f"Order ({cover_days}d vel)",
+    "Reorder_STR":"Order (STR)",
     "Avg_Price":"Avg Price","Est_Value":"Est. Value"
 })
 
@@ -539,12 +585,12 @@ def _style_order(val):
 
 fmt_d = {"STR %":"{:.1f}%","Units Sold":"{:,.0f}","In Stock":"{:,.0f}",
          "Rate/wk":"{:.2f}","Avg Price":"NPR {:,.0f}","Est. Value":"{:,.0f}",
-         "Order (Wk)":"{:,.0f}","Order (STR)":"{:,.0f}"}
+         f"Order ({cover_days}d vel)":"{:,.0f}","Order (STR)":"{:,.0f}"}
 _st = disp.style.map(_style_status, subset=["Status"])
-if "Order (Wk)"  in disp.columns: _st = _st.map(_style_order, subset=["Order (Wk)"])
-if "Order (STR)" in disp.columns: _st = _st.map(_style_order, subset=["Order (STR)"])
+if f"Order ({cover_days}d vel)" in disp.columns: _st = _st.map(_style_order, subset=[f"Order ({cover_days}d vel)"])
+if "Order (STR)"                in disp.columns: _st = _st.map(_style_order, subset=["Order (STR)"])
 st.dataframe(_st.format(fmt_d), width='stretch', hide_index=True)
-st.caption(f"{len(disp):,} products · 🔵 Order (Wk) = {target_weeks}-week buffer · 🟣 Order (STR) = restore original stock")
+st.caption(f"{len(disp):,} products · 🔵 Order ({cover_days}d vel) = daily velocity × {cover_days}d − stock · 🟣 Order (STR) = restore original stock")
 
 # ── Pre-compute size / color / store data ─────────────────────────────────────
 sz = pd.DataFrame()
@@ -563,7 +609,7 @@ if size_df is not None:
         _sz["_size_share"] = (_sz["Units Sold"] / prod_total_sold.replace(0, float("nan"))).fillna(
             1.0 / _sz.groupby("Product Name")["Units Sold"].transform("count"))
         _sz["Weekly Rate"] = (_sz["_prod_rate"] * _sz["_size_share"]).round(2)
-        _sz["Order (Wk)"]  = (_sz["Weekly Rate"] * target_weeks - _sz["In Stock"]).clip(lower=0).round().astype(int)
+        _sz["Order (Vel)"] = (_sz["Weekly Rate"] / 7 * cover_days - _sz["In Stock"]).clip(lower=0).round().astype(int)
         _sz["Order (STR)"] = (_sz["Units Sold"]  - _sz["In Stock"]).clip(lower=0).round().astype(int)
         sz = _sz
 
@@ -600,15 +646,15 @@ st.markdown('<div class="sec">📏 Size Breakdown by Product</div>', unsafe_allo
 if sz.empty:
     st.info("No size data for the current filters." if size_df is not None else "Variant data not available.")
 else:
-    disp_sz = sz[["Product Name","Size","Units Sold","In Stock","STR %","Status","Weekly Rate","Order (Wk)","Order (STR)"]].copy()
+    disp_sz = sz[["Product Name","Size","Units Sold","In Stock","STR %","Status","Weekly Rate","Order (Vel)","Order (STR)"]].copy()
     _sst = (disp_sz.style
         .map(_style_sz_status, subset=["Status"])
-        .map(_style_sz_order,  subset=["Order (Wk)"])
+        .map(_style_sz_order,  subset=["Order (Vel)"])
         .map(_style_sz_str,    subset=["Order (STR)"])
         .format({"STR %":"{:.1f}%","Units Sold":"{:,.0f}","In Stock":"{:,.0f}",
-                 "Weekly Rate":"{:.2f}","Order (Wk)":"{:,.0f}","Order (STR)":"{:,.0f}"}))
+                 "Weekly Rate":"{:.2f}","Order (Vel)":"{:,.0f}","Order (STR)":"{:,.0f}"}))
     st.dataframe(_sst, width='stretch', hide_index=True)
-    st.caption(f"{len(sz):,} size rows · 🔵 Order (Wk) = {target_weeks}-week buffer per size · 🟣 Order (STR) = restore level")
+    st.caption(f"{len(sz):,} size rows · 🔵 Order (Vel) = daily velocity × {cover_days}d − stock · 🟣 Order (STR) = restore level")
 
 # ── Color Breakdown by Product (flat table) ───────────────────────────────────
 st.markdown('<div class="sec">🎨 Color Breakdown by Product</div>', unsafe_allow_html=True)
@@ -649,7 +695,7 @@ else:
         store_totals = store_totals.sort_values("_order").drop(columns=["_order"])
         grand_sold   = store_totals["Units_Sold"].sum()
         store_totals["Share_%"]   = (store_totals["Units_Sold"] / grand_sold * 100).round(1) if grand_sold > 0 else 0
-        store_totals["Order_Wk"]  = (store_totals["Share_%"] / 100 * total_units_wk ).round().astype(int)
+        store_totals["Order_Vel"] = (store_totals["Share_%"] / 100 * total_units_vel).round().astype(int)
         store_totals["Order_STR"] = (store_totals["Share_%"] / 100 * total_units_str).round().astype(int)
         store_totals = store_totals[store_totals["Units_Sold"] > 0]
 
@@ -661,17 +707,17 @@ else:
         with tab_store:
             col_tbl, col_bar = st.columns([2, 3])
             with col_tbl:
-                disp_st = store_totals[["Store","Units_Sold","Share_%","Order_Wk","Order_STR"]].rename(columns={
+                disp_st = store_totals[["Store","Units_Sold","Share_%","Order_Vel","Order_STR"]].rename(columns={
                     "Units_Sold":"Units Sold","Share_%":"Share %",
-                    "Order_Wk":f"Order (Wk)","Order_STR":"Order (STR)"})
+                    "Order_Vel":f"Order ({cover_days}d vel)","Order_STR":"Order (STR)"})
                 st.dataframe(
                     disp_st.style
-                        .map(_style_ord,     subset=["Order (Wk)"])
+                        .map(_style_ord,     subset=[f"Order ({cover_days}d vel)"])
                         .map(_style_str_ord, subset=["Order (STR)"])
                         .format({"Units Sold":"{:,.0f}","Share %":"{:.1f}%",
-                                 "Order (Wk)":"{:,.0f}","Order (STR)":"{:,.0f}"}),
+                                 f"Order ({cover_days}d vel)":"{:,.0f}","Order (STR)":"{:,.0f}"}),
                     width='stretch', hide_index=True)
-                st.caption(f"Total: {store_totals['Order_Wk'].sum():,} units (Wk) / "
+                st.caption(f"Total: {store_totals['Order_Vel'].sum():,} units (Vel) / "
                            f"{store_totals['Order_STR'].sum():,} units (STR) · "
                            f"{len(store_totals)} stores")
             with col_bar:
@@ -683,7 +729,7 @@ else:
                         f'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:2px">'
                         f'<span><strong>{row["Store"]}</strong></span>'
                         f'<span style="color:#6b7280">{int(row["Units_Sold"]):,} units · '
-                        f'{row["Share_%"]:.0f}% · <span style="color:#1d4ed8">Order {int(row["Order_Wk"])} (Wk)</span></span>'
+                        f'{row["Share_%"]:.0f}% · <span style="color:#1d4ed8">Order {int(row["Order_Vel"])} (Vel)</span></span>'
                         f'</div>'
                         f'<div style="background:#e2e8f0;border-radius:4px;height:8px">'
                         f'<div style="background:#1d4ed8;width:{pct:.0f}%;height:8px;border-radius:4px"></div>'
@@ -716,16 +762,17 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
     full = prod_sum[["Product Name","Category"] +
                    (["Sub Category"] if "Sub Category" in prod_sum.columns else []) +
                    ["STR_Status","STR_Pct","Total_Sold","Total_Stock",
-                    "Weekly_Rate","Reorder_Wk","Reorder_STR","Avg_Price","Est_Value"]].copy()
+                    "Weekly_Rate","Reorder_Velocity","Reorder_STR","Avg_Price","Est_Value"]].copy()
     full = full.rename(columns={"STR_Status":"Status","STR_Pct":"STR %",
                                 "Total_Sold":"Units Sold","Total_Stock":"In Stock",
-                                "Weekly_Rate":"Rate/wk","Reorder_Wk":f"Order (Wk/{target_weeks}wk)",
+                                "Weekly_Rate":"Rate/wk",
+                                "Reorder_Velocity":f"Order ({cover_days}d vel)",
                                 "Reorder_STR":"Order (STR)","Avg_Price":"Avg Price NPR",
                                 "Est_Value":"Est. Value NPR"})
     full.to_excel(writer, sheet_name="Product Reorder Plan", index=False)
 
     if size_df is not None and "sz" in dir() and not sz.empty:
-        sz_exp = sz[["Product Name","Size","Units Sold","In Stock","STR %","Status","Weekly Rate","Order (Wk)","Order (STR)"]].copy()
+        sz_exp = sz[["Product Name","Size","Units Sold","In Stock","STR %","Status","Weekly Rate","Order (Vel)","Order (STR)"]].copy()
         sz_exp.to_excel(writer, sheet_name="By Size", index=False)
 
     if color_df is not None and "cl" in dir() and not cl.empty:
@@ -734,7 +781,7 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
 
     if df_prodstore is not None and "store_totals" in dir() and not store_totals.empty:
         store_totals.rename(columns={"Units_Sold":"Units Sold","Share_%":"Share %",
-                                     "Order_Wk":"Order (Wk)","Order_STR":"Order (STR)"})\
+                                     "Order_Vel":f"Order ({cover_days}d vel)","Order_STR":"Order (STR)"})\
             .to_excel(writer, sheet_name="By Store", index=False)
 
 out.seek(0)
