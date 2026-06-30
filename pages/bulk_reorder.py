@@ -829,6 +829,8 @@ else:
             cat_store = ps.groupby(grp_key).agg(Units_Sold=("Units Sold","sum")).reset_index()
             stores_present = [s for s in LOCATION_ORDER if s in cat_store["Store"].unique()]
             pivot_cols = ["Category","Sub Category"] if "Sub Category" in cat_store.columns else ["Category"]
+
+            # ── Units Sold pivot ────────────────────────────────────────────────
             pivot = cat_store.pivot_table(
                 index=pivot_cols, columns="Store", values="Units_Sold",
                 aggfunc="sum", fill_value=0
@@ -837,10 +839,52 @@ else:
             store_cols_present = [c for c in stores_present if c in pivot.columns]
             pivot["Total"] = pivot[store_cols_present].sum(axis=1)
             pivot = pivot.sort_values("Total", ascending=False)
+
+            st.markdown("**Units Sold per Category per Store**")
             st.dataframe(
                 pivot.style.format({c: "{:,.0f}" for c in store_cols_present + ["Total"]}),
                 width='stretch', hide_index=True)
-            st.caption("Units sold per category per store")
+
+            # ── Reorder Qty pivot — distribute category Order(60d) by store share ──
+            st.markdown(f"**Order ({cover_days}d) per Category per Store**")
+            st.caption("Each category's total reorder qty split by that store's share of sales")
+
+            # Build category total reorder lookup from cat_sum
+            cat_reorder_map = {}
+            for _, r in cat_sum.iterrows():
+                key = tuple(r[c] for c in cat_grp)
+                cat_reorder_map[key] = r.get(f"Order ({cover_days}d)", 0)
+
+            reorder_rows = []
+            for _, row in pivot.iterrows():
+                key = tuple(row[c] for c in pivot_cols)
+                # Match against cat_grp keys (may differ if has_sub mismatches)
+                total_reorder = cat_reorder_map.get(key, 0)
+                if not isinstance(total_reorder,(int,float)): total_reorder = 0
+                row_total_sold = row["Total"]
+                new_row = {c: row[c] for c in pivot_cols}
+                for store in store_cols_present:
+                    share = row[store] / row_total_sold if row_total_sold > 0 else 0
+                    new_row[store] = round(total_reorder * share)
+                new_row["Total Order"] = total_reorder
+                reorder_rows.append(new_row)
+
+            reorder_pivot = pd.DataFrame(reorder_rows)
+            if not reorder_pivot.empty:
+                reorder_pivot = reorder_pivot.sort_values("Total Order", ascending=False)
+
+                def _ro_style(val):
+                    if isinstance(val,(int,float)) and val > 0:
+                        return "background-color:#dbeafe;color:#1e40af;font-weight:700"
+                    return ""
+
+                st.dataframe(
+                    reorder_pivot.style
+                        .map(_ro_style, subset=store_cols_present + ["Total Order"])
+                        .format({c: "{:,.0f}" for c in store_cols_present + ["Total Order"]}),
+                    width='stretch', hide_index=True)
+            else:
+                st.info("No reorder data to distribute for current filters.")
 
 # ── Download ──────────────────────────────────────────────────────────────────
 st.markdown("---")
