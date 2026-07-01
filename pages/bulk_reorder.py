@@ -368,16 +368,29 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**📈 Velocity Settings**")
 
-    # Only show windows we actually have data for in the export
-    _vel_options = [60, 90]
+    # Available windows depend on what columns the export has
+    _has_30d  = "Recent Sold 30d"  in df_prod.columns if df_prod is not None else False
+    _has_180d = "Recent Sold 180d" in df_prod.columns if df_prod is not None else False
+
+    if _has_30d and _has_180d:
+        _vel_options = [30, 60, 90, 180]
+    elif _has_30d:
+        _vel_options = [30, 60, 90]
+    elif _has_180d:
+        _vel_options = [60, 90, 180]
+    else:
+        _vel_options = [60, 90]
+
     velocity_days = st.select_slider(
         "Sales lookback window (days)", options=_vel_options, value=60,
         help=(
             "Sets the window for calculating daily sell rate.\n\n"
-            "**60d** = balanced (recommended) — uses Recent Sold 60d\n"
-            "**90d** = smoothed average (conservative) — uses Recent Sold 90d\n\n"
-            "Export only contains 60d and 90d windows. "
-            "Run a fresh export to get updated data."
+            "**30d** = recent momentum — aggressive, good mid-season\n"
+            "**60d** = balanced (recommended)\n"
+            "**90d** = smoothed average — conservative\n"
+            "**180d** = half-year trend — very conservative\n\n"
+            "Only windows available in the export are shown. "
+            "Run `patch_odoo_windows.py` then re-export to unlock 30d and 180d."
         )
     )
     cover_days = st.slider(
@@ -497,41 +510,49 @@ if has_recent:
         prod_sum["Recent_90"] = prod_sum["Recent_60"]
 
     # Pick the best available window for velocity calculation
-    # Export has 60d and 90d — use whichever is closest to velocity_days
-    # For >90d settings we use 90d (best available), for <=60d use 60d
-    if velocity_days <= 60:
-        prod_sum["_vel_sales"] = prod_sum["Recent_60"]
-        _vel_window = 60
-    elif velocity_days <= 90 or not has_recent_90:
-        prod_sum["_vel_sales"] = prod_sum["Recent_90"]
-        _vel_window = 90
+    # Use the exact window if available, else fall back to nearest
+    _window_map = {}
+    if "Recent Sold 30d"  in bdf.columns: _window_map[30]  = "Recent Sold 30d"
+    if "Recent Sold 60d"  in bdf.columns: _window_map[60]  = "Recent Sold 60d"
+    if "Recent Sold 90d"  in bdf.columns: _window_map[90]  = "Recent Sold 90d"
+    if "Recent Sold 180d" in bdf.columns: _window_map[180] = "Recent Sold 180d"
+
+    # Find the closest available window to what was selected
+    _available = sorted(_window_map.keys())
+    if velocity_days in _window_map:
+        _vel_window = velocity_days
     else:
-        # >90d requested but we only have 90d — use 90d with a note
-        prod_sum["_vel_sales"] = prod_sum["Recent_90"]
-        _vel_window = 90
+        # Use nearest available window
+        _vel_window = min(_available, key=lambda x: abs(x - velocity_days))
+
+    _vel_col = _window_map.get(_vel_window, "Recent Sold 60d")
+
+    # Aggregate the chosen window
+    vel_sales_agg = bdf.groupby(grp_cols).agg(
+        _vel_sales = (_vel_col, "sum"),
+    ).reset_index()
+    prod_sum = prod_sum.merge(vel_sales_agg, on=grp_cols, how="left")
+    prod_sum["_vel_sales"] = prod_sum["_vel_sales"].fillna(0)
 
     prod_sum["_recent_vel"]   = (prod_sum["_vel_sales"] / _vel_window).round(4)
     prod_sum["_lifetime_vel"] = (prod_sum["Total_Sold"] /
         prod_sum["days_live"].clip(upper=365).clip(lower=7)).round(4)
 
     def _calc_velocity(r):
-        if r["Recent_60"] == 0:
-            # Tier 1 — no current demand
-            return r["_lifetime_vel"]   # display only; reorder will be 0
+        if r["_vel_sales"] == 0:
+            return r["_lifetime_vel"]
         elif r["days_live"] < NEW_PRODUCT_DAYS:
-            # Tier 2 — new product, use recent only
             return r["_recent_vel"]
         else:
-            # Tier 3 — established, use conservative min
             return min(r["_recent_vel"], r["_lifetime_vel"])
 
     def _calc_reorder_vel(r):
-        if r["Recent_60"] == 0:
-            return 0.0  # Tier 1 — no reorder without demand signal
+        if r["_vel_sales"] == 0:
+            return 0.0
         elif r["days_live"] < NEW_PRODUCT_DAYS:
-            return r["_recent_vel"]     # Tier 2
+            return r["_recent_vel"]
         else:
-            return min(r["_recent_vel"], r["_lifetime_vel"])  # Tier 3
+            return min(r["_recent_vel"], r["_lifetime_vel"])
 
     prod_sum["Daily_Velocity"]    = prod_sum.apply(_calc_velocity,     axis=1).round(4)
     prod_sum["_reorder_vel_daily"]= prod_sum.apply(_calc_reorder_vel,  axis=1).round(4)
@@ -542,10 +563,10 @@ if has_recent:
         prod_sum["_reorder_vel_daily"] * cover_days - prod_sum["Total_Stock"]
     ).clip(lower=0).round().astype(int)
 
-    # Tier counts based on 60d window (most accurate signal)
-    t1 = (prod_sum["Recent_60"] == 0).sum()
-    t2 = ((prod_sum["Recent_60"] > 0) & (prod_sum["days_live"] < NEW_PRODUCT_DAYS)).sum()
-    t3 = ((prod_sum["Recent_60"] > 0) & (prod_sum["days_live"] >= NEW_PRODUCT_DAYS)).sum()
+    # Tier counts — use the selected velocity window
+    t1 = (prod_sum["_vel_sales"] == 0).sum()
+    t2 = ((prod_sum["_vel_sales"] > 0) & (prod_sum["days_live"] < NEW_PRODUCT_DAYS)).sum()
+    t3 = ((prod_sum["_vel_sales"] > 0) & (prod_sum["days_live"] >= NEW_PRODUCT_DAYS)).sum()
     _window_note = f" (using {_vel_window}d window)" if _vel_window != velocity_days else ""
     st.sidebar.success(
         f"✅ Velocity tiers{_window_note}:\n"
@@ -565,11 +586,11 @@ else:
         "⚠️ Using all-time sales for velocity — re-export products to get Recent Sold 60d")
 
 
-# Velocity tier label — always based on 60d vs lifetime for accuracy
+# Velocity tier label — always based on selected window vs lifetime
 if has_recent:
     def _tier_label(r):
-        if r["Recent_60"] == 0:               return "🔴 No demand"
-        if r["days_live"] < NEW_PRODUCT_DAYS: return "🆕 New (<90d)"
+        if r["_vel_sales"] == 0:               return "🔴 No demand"
+        if r["days_live"] < NEW_PRODUCT_DAYS:  return "🆕 New (<90d)"
         rv = r["_recent_vel"]; lv = r["_lifetime_vel"]
         if rv < lv * 0.8:  return "📉 Slowing"
         if rv > lv * 1.2:  return "📈 Trending"
@@ -617,11 +638,9 @@ else:
 
     def _last_sold_signal(r):
         if r["Total_Sold"] == 0: return "Never sold", 9999
-        r60 = r.get("Recent_60", 0) if has_recent else 0
-        r90 = r.get("Recent_90", 0)
-        if r60 > 0:   return "< 60d", 30
-        elif r90 > 0: return "60–90d", 75
-        else:         return "> 90d", 120
+        vs = r.get("_vel_sales", 0)
+        if vs > 0:    return f"< {_vel_window}d", 30
+        else:         return f"> {_vel_window}d", _vel_window + 30
 
     signals = prod_sum.apply(_last_sold_signal, axis=1, result_type="expand")
     prod_sum["Last Sold"]      = signals[0]
