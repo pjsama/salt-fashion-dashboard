@@ -484,7 +484,32 @@ if has_recent:
     prod_sum = prod_sum.merge(recent_60, on=grp_cols, how="left")
     prod_sum["Recent_60"] = prod_sum["Recent_60"].fillna(0)
 
-    prod_sum["_recent_vel"]   = (prod_sum["Recent_60"] / 60).round(4)
+    # Also load 90d window if available
+    has_recent_90 = "Recent Sold 90d" in bdf.columns
+    if has_recent_90:
+        recent_90 = bdf.groupby(grp_cols).agg(
+            Recent_90 = ("Recent Sold 90d", "sum"),
+        ).reset_index()
+        prod_sum = prod_sum.merge(recent_90, on=grp_cols, how="left")
+        prod_sum["Recent_90"] = prod_sum["Recent_90"].fillna(0)
+    else:
+        prod_sum["Recent_90"] = prod_sum["Recent_60"]
+
+    # Pick the best available window for velocity calculation
+    # Export has 60d and 90d — use whichever is closest to velocity_days
+    # For >90d settings we use 90d (best available), for <=60d use 60d
+    if velocity_days <= 60:
+        prod_sum["_vel_sales"] = prod_sum["Recent_60"]
+        _vel_window = 60
+    elif velocity_days <= 90 or not has_recent_90:
+        prod_sum["_vel_sales"] = prod_sum["Recent_90"]
+        _vel_window = 90
+    else:
+        # >90d requested but we only have 90d — use 90d with a note
+        prod_sum["_vel_sales"] = prod_sum["Recent_90"]
+        _vel_window = 90
+
+    prod_sum["_recent_vel"]   = (prod_sum["_vel_sales"] / _vel_window).round(4)
     prod_sum["_lifetime_vel"] = (prod_sum["Total_Sold"] /
         prod_sum["days_live"].clip(upper=365).clip(lower=7)).round(4)
 
@@ -516,16 +541,19 @@ if has_recent:
         prod_sum["_reorder_vel_daily"] * cover_days - prod_sum["Total_Stock"]
     ).clip(lower=0).round().astype(int)
 
-    # Tier counts for sidebar info
+    # Tier counts based on 60d window (most accurate signal)
     t1 = (prod_sum["Recent_60"] == 0).sum()
     t2 = ((prod_sum["Recent_60"] > 0) & (prod_sum["days_live"] < NEW_PRODUCT_DAYS)).sum()
     t3 = ((prod_sum["Recent_60"] > 0) & (prod_sum["days_live"] >= NEW_PRODUCT_DAYS)).sum()
+    _window_note = f" (using {_vel_window}d window)" if _vel_window != velocity_days else ""
     st.sidebar.success(
-        f"✅ Velocity tiers:\n"
+        f"✅ Velocity tiers{_window_note}:\n"
         f"- {t3} established (min recent/lifetime)\n"
         f"- {t2} new <{NEW_PRODUCT_DAYS}d (recent only)\n"
         f"- {t1} no recent sales (reorder=0)")
 else:
+    _vel_window = velocity_days
+    prod_sum["_vel_sales"]   = prod_sum["Total_Sold"]
     prod_sum["effective_days"]   = prod_sum["days_live"].clip(upper=velocity_days).clip(lower=7)
     prod_sum["Daily_Velocity"]   = (prod_sum["Total_Sold"] / prod_sum["effective_days"]).round(4)
     prod_sum["Weekly_Rate"]      = (prod_sum["Daily_Velocity"] * 7).round(2)
@@ -536,22 +564,21 @@ else:
         "⚠️ Using all-time sales for velocity — re-export products to get Recent Sold 60d")
 
 
-# Velocity tier label for product table
+# Velocity tier label — always based on 60d vs lifetime for accuracy
 if has_recent:
     def _tier_label(r):
-        if r["Recent_60"] == 0:         return "🔴 No demand"
+        if r["Recent_60"] == 0:               return "🔴 No demand"
         if r["days_live"] < NEW_PRODUCT_DAYS: return "🆕 New (<90d)"
         rv = r["_recent_vel"]; lv = r["_lifetime_vel"]
-        if rv < lv * 0.8:               return "📉 Slowing"
-        if rv > lv * 1.2:               return "📈 Trending"
+        if rv < lv * 0.8:  return "📉 Slowing"
+        if rv > lv * 1.2:  return "📈 Trending"
         return "✅ Stable"
     prod_sum["Vel_Tier"] = prod_sum.apply(_tier_label, axis=1)
 else:
     prod_sum["Vel_Tier"] = "—"
 
-prod_sum["Net_Sales"] = (prod_sum["Recent_60"]
-                         if "Recent_60" in prod_sum.columns
-                         else prod_sum["Total_Sold"])
+# Net_Sales for KPI display — use the window that matches velocity_days
+prod_sum["Net_Sales"] = prod_sum["_vel_sales"] if has_recent else prod_sum["Total_Sold"]
 prod_sum["weeks_live"]  = (prod_sum["days_live"] / 7).clip(lower=1)
 prod_sum["Est_Value"]   = prod_sum["Reorder_Velocity"] * prod_sum["Avg_Price"]
 
@@ -644,7 +671,7 @@ st.markdown(
 
 # ── KPIs ──────────────────────────────────────────────────────────────────────
 c1,c2,c3,c4,c5 = st.columns(5)
-net_lbl = f"Net Sales ({velocity_days}d)" if has_recent else "Total Sold (all-time)"
+net_lbl = f"Net Sales ({_vel_window}d)" if has_recent else "Total Sold (all-time)"
 for col, val, lbl, clr in [
     (c1, f"{n_products:,}",        "Products",                         "#374151"),
     (c2, f"{fast_count:,}",        "Fast / Super Fast",                "#16a34a"),
