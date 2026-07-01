@@ -1004,16 +1004,17 @@ out = BytesIO()
 with pd.ExcelWriter(out, engine="openpyxl") as writer:
     cat_sum.to_excel(writer, sheet_name="Category Summary", index=False)
 
-    full = prod_sum[["Product Name","Category"] +
+    full = prod_sum[["Product Name","Brand","Category"] +
                    (["Sub Category"] if "Sub Category" in prod_sum.columns else []) +
                    ["STR_Status","STR_Pct","Total_Sold","Net_Sales",
-                    "Daily_Velocity","Weekly_Rate","Total_Stock","Reorder_Velocity","Avg_Price","Est_Value"]].copy()
+                    "Daily_Velocity","Weekly_Rate","Vel_Tier","Total_Stock",
+                    "Reorder_Velocity","Avg_Price","Est_Value"]].copy()
     full = full.rename(columns={"STR_Status":"Status","STR_Pct":"STR %",
                                 "Total_Sold":"Units Sold","Total_Stock":"In Stock",
-                                "Weekly_Rate":"Rate/wk",
+                                "Weekly_Rate":"Rate/wk","Vel_Tier":"Trend",
                                 "Reorder_Velocity":f"Order ({cover_days}d)",
                                 "Net_Sales":net_lbl,"Daily_Velocity":"Velocity (u/day)",
-                                "Total_Stock":"In Stock","Avg_Price":"Avg Price NPR",
+                                "Avg_Price":"Avg Price NPR",
                                 "Est_Value":"Est. Value NPR"})
     full.to_excel(writer, sheet_name="Product Reorder Plan", index=False)
 
@@ -1069,6 +1070,10 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                 "In Stock":"In Stock (color)",
             })
 
+            # Fix: drop duplicate Status column from merge
+            if "Status.1" in cl_exp.columns:
+                cl_exp = cl_exp.drop(columns=["Status.1"])
+
             export_cols = [
                 "Product Name","Brand","Category","Sub Category",
                 "Color","Units Sold (color)","In Stock (color)",
@@ -1090,10 +1095,46 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                                      "Order_Vel":f"Order ({cover_days}d)"})\
             .to_excel(writer, sheet_name="By Store", index=False)
 
+        # Category × Store — units sold pivot
+        if "ps" in dir() and not ps.empty:
+            try:
+                grp_key_dl = ["Category","Sub Category","Store"] if "Sub Category" in ps.columns else ["Category","Store"]
+                cat_store_dl = ps.groupby(grp_key_dl).agg(Units_Sold=("Units Sold","sum")).reset_index()
+                stores_dl = [s for s in LOCATION_ORDER if s in cat_store_dl["Store"].unique()]
+                pivot_cols_dl = ["Category","Sub Category"] if "Sub Category" in cat_store_dl.columns else ["Category"]
+                pivot_dl = cat_store_dl.pivot_table(
+                    index=pivot_cols_dl, columns="Store", values="Units_Sold",
+                    aggfunc="sum", fill_value=0
+                ).reset_index()
+                pivot_dl.columns.name = None
+                store_cols_dl = [c for c in stores_dl if c in pivot_dl.columns]
+                pivot_dl["Total"] = pivot_dl[store_cols_dl].sum(axis=1)
+                pivot_dl = pivot_dl.sort_values("Total", ascending=False)
+                pivot_dl.to_excel(writer, sheet_name="Category × Store (Sold)", index=False)
+
+                # Category × Store — reorder pivot
+                reorder_rows_dl = []
+                for _, row in pivot_dl.iterrows():
+                    key = tuple(row[c] for c in pivot_cols_dl)
+                    total_reorder = cat_reorder_map.get(key, 0)
+                    if not isinstance(total_reorder,(int,float)): total_reorder = 0
+                    row_total = row["Total"]
+                    new_row = {c: row[c] for c in pivot_cols_dl}
+                    for store in store_cols_dl:
+                        share = row[store] / row_total if row_total > 0 else 0
+                        new_row[store] = round(total_reorder * share)
+                    new_row["Total Order"] = total_reorder
+                    reorder_rows_dl.append(new_row)
+                pd.DataFrame(reorder_rows_dl).sort_values(
+                    "Total Order", ascending=False
+                ).to_excel(writer, sheet_name="Category × Store (Order)", index=False)
+            except Exception as e:
+                pass  # Skip if pivot fails
+
 out.seek(0)
 fname = f"reorder_{'-'.join(sel_brands) if sel_brands else 'All'}_{('-'.join(sel_cats) if sel_cats else 'AllCats').replace(' ','_')[:30]}.xlsx"
 st.download_button(
     f"⬇️ Download Full Reorder Plan — {sel_brand} / {sel_cat if sel_cats else 'All'}",
     data=out, file_name=fname,
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-st.caption("Download includes: Category Summary · Product Plan · Size Breakdown · **Color + Reorder** · Store Distribution")
+st.caption("Download includes: Category Summary · Product Plan (with Brand) · Size Breakdown · Color + Reorder · By Store · Category × Store (Sold) · Category × Store (Order)")
