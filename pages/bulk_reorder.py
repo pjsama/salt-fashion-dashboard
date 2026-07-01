@@ -106,15 +106,21 @@ def load_products():
     # but Size column is empty — strip it out and populate Size
     SIZE_SUFFIXES = {"XS","S","M","L","XL","2XL","3XL","4XL","5XL",
                      "ONE SIZE","FREE SIZE","36","37","38","39","40","41","42","43","44"}
+    _dash_re = re.compile(r'\s[-–]\s([A-Z0-9]{1,4})$')
+
     def _fix_name_size(row):
         name = row["Product Name"]
         size = row["Size"]
-        if "/" not in name:
-            return name, size
-        parts = name.rsplit("/", 1)
-        suffix = parts[1].strip()
-        if suffix.upper() in SIZE_SUFFIXES:
-            return parts[0].strip(), size if size else suffix
+        # Pattern 1: "Product/S"
+        if "/" in name:
+            parts = name.rsplit("/", 1)
+            suffix = parts[1].strip()
+            if suffix.upper() in SIZE_SUFFIXES:
+                return parts[0].strip(), size if size else suffix
+        # Pattern 2: "Product - M"
+        m = _dash_re.search(name)
+        if m and m.group(1).upper() in SIZE_SUFFIXES:
+            return name[:m.start()].strip(), size if size else m.group(1)
         return name, size
 
     if "Product Name" in df.columns and "Size" in df.columns:
@@ -165,18 +171,23 @@ def load_variants():
                               .str.strip()
                               .str.strip('"'))
 
-        # Strip size suffix from product name where it's embedded (e.g. "Dress/S")
+        # Strip size suffix from product name where it's embedded (e.g. "Dress/S" or "Dress - M")
         # Always strip if the suffix is a known size — even if Size column is already populated
+        _dash_re2 = re.compile(r'\s[-–]\s([A-Z0-9]{1,4})$')
+
         def _fix_variant_name(row):
             name = row["Product Name"]
             size = str(row.get("Size","")).strip() if "Size" in row.index else ""
-            if "/" not in name:
-                return name, size
-            parts = name.rsplit("/", 1)
-            suffix = parts[1].strip()
-            if suffix.upper() in SIZE_SUFFIXES_SET:
-                # Strip suffix from name; keep existing size or use suffix
-                return parts[0].strip(), size if size else suffix
+            # Pattern 1: "Product/S"
+            if "/" in name:
+                parts = name.rsplit("/", 1)
+                suffix = parts[1].strip()
+                if suffix.upper() in SIZE_SUFFIXES_SET:
+                    return parts[0].strip(), size if size else suffix
+            # Pattern 2: "Product - M"
+            m = _dash_re2.search(name)
+            if m and m.group(1).upper() in SIZE_SUFFIXES_SET:
+                return name[:m.start()].strip(), size if size else m.group(1)
             return name, size
 
         if "Size" in df.columns:
@@ -288,21 +299,30 @@ with st.sidebar:
 
     brands = sorted([b for b in df_prod["Brand"].unique()
                      if b and b not in ("","nan","True","False")])
-    sel_brand = st.selectbox("Brand", brands)
+    sel_brands = st.multiselect("Brand", brands, default=[brands[0]] if brands else [],
+        help="Select one or more brands")
 
-    cats = ["All"] + sorted([c for c in df_prod[df_prod["Brand"]==sel_brand]["Category"].unique()
-                              if c.strip().lower() not in JUNK_CATS])
-    sel_cat = st.selectbox("Category", cats)
+    # Categories cascade from selected brands
+    _brand_df = df_prod[df_prod["Brand"].isin(sel_brands)] if sel_brands else df_prod
+    cats = sorted([c for c in _brand_df["Category"].unique()
+                   if c.strip().lower() not in JUNK_CATS])
+    sel_cats = st.multiselect("Category", cats, default=[],
+        help="Select one or more categories — leave empty to include all")
 
-    # Sub-category cascades from category
-    sel_sub = "All"
-    if sel_cat != "All" and "Sub Category" in df_prod.columns:
-        subs = sorted([s for s in df_prod[
-            (df_prod["Brand"]==sel_brand) &
-            (df_prod["Category"]==sel_cat)
-        ]["Sub Category"].unique() if s and s not in ("","nan")])
+    # Sub-categories cascade from selected categories
+    sel_subs = []
+    if sel_cats and "Sub Category" in df_prod.columns:
+        _cat_df = _brand_df[_brand_df["Category"].isin(sel_cats)]
+        subs = sorted([s for s in _cat_df["Sub Category"].unique()
+                       if s and s not in ("","nan")])
         if subs:
-            sel_sub = st.selectbox("Sub Category", ["All"] + subs)
+            sel_subs = st.multiselect("Sub Category", subs, default=[],
+                help="Select one or more sub-categories — leave empty to include all")
+
+    # Backwards-compat single values for header display
+    sel_brand = ", ".join(sel_brands) if sel_brands else "All"
+    sel_cat   = ", ".join(sel_cats)   if sel_cats   else "All"
+    sel_sub   = ", ".join(sel_subs)   if sel_subs   else "All"
 
     # Search by product name
     search = st.text_input("🔍 Search product", placeholder="Type to filter products…")
@@ -357,12 +377,12 @@ with st.sidebar:
         st.cache_resource.clear(); st.rerun()
 
 # ── Filter products ───────────────────────────────────────────────────────────
-bdf = df_prod[df_prod["Brand"] == sel_brand].copy()
+bdf = df_prod[df_prod["Brand"].isin(sel_brands)].copy() if sel_brands else df_prod.copy()
 bdf = bdf[~bdf["Category"].str.strip().str.lower().isin(JUNK_CATS)]
-if sel_cat != "All":
-    bdf = bdf[bdf["Category"] == sel_cat]
-if sel_sub != "All" and "Sub Category" in bdf.columns:
-    bdf = bdf[bdf["Sub Category"] == sel_sub]
+if sel_cats:
+    bdf = bdf[bdf["Category"].isin(sel_cats)]
+if sel_subs and "Sub Category" in bdf.columns:
+    bdf = bdf[bdf["Sub Category"].isin(sel_subs)]
 if search.strip():
     bdf = bdf[bdf["Product Name"].str.contains(search.strip(), case=False, na=False)]
 
@@ -617,12 +637,12 @@ if size_df is None:
     st.info("Size data not available — run `variant_export.py` first.")
 else:
     # Filter size_df to current brand + category + sub filters
-    _sz_cat = size_df[size_df["Brand"].str.strip() == sel_brand].copy()
+    _sz_cat = size_df[size_df["Brand"].str.strip().isin(sel_brands)].copy() if sel_brands else size_df.copy()
     _sz_cat = _sz_cat[~_sz_cat["Category"].str.strip().str.lower().isin(JUNK_CATS)]
-    if sel_cat != "All" and "Category" in _sz_cat.columns:
-        _sz_cat = _sz_cat[_sz_cat["Category"].str.strip() == sel_cat]
-    if sel_sub != "All" and "Sub Category" in _sz_cat.columns:
-        _sz_cat = _sz_cat[_sz_cat["Sub Category"].str.strip() == sel_sub]
+    if sel_cats and "Category" in _sz_cat.columns:
+        _sz_cat = _sz_cat[_sz_cat["Category"].str.strip().isin(sel_cats)]
+    if sel_subs and "Sub Category" in _sz_cat.columns:
+        _sz_cat = _sz_cat[_sz_cat["Sub Category"].str.strip().isin(sel_subs)]
     if search.strip():
         _sz_cat = _sz_cat[_sz_cat["Product Name"].str.contains(search.strip(), case=False, na=False)]
 
@@ -758,9 +778,9 @@ st.caption(f"{len(disp):,} products · 🔵 Order ({cover_days}d) = velocity × 
 # ── Pre-compute size / color / store data ─────────────────────────────────────
 sz = pd.DataFrame()
 if size_df is not None:
-    _sz = size_df[size_df["Brand"].str.strip() == sel_brand].copy()
-    if sel_cat != "All" and "Category" in _sz.columns:
-        _sz = _sz[_sz["Category"].str.strip() == sel_cat]
+    _sz = size_df[size_df["Brand"].str.strip().isin(sel_brands)].copy() if sel_brands else size_df.copy()
+    if sel_cats and "Category" in _sz.columns:
+        _sz = _sz[_sz["Category"].str.strip().isin(sel_cats)]
     filtered_products_set = set(prod_sum["Product Name"].str.strip())
     _sz = _sz[_sz["Product Name"].str.strip().isin(filtered_products_set)]
     if not _sz.empty:
@@ -781,9 +801,9 @@ if size_df is not None:
 
 cl = pd.DataFrame()
 if color_df is not None:
-    _cl = color_df[color_df["Brand"].str.strip() == sel_brand].copy()
-    if sel_cat != "All" and "Category" in _cl.columns:
-        _cl = _cl[_cl["Category"].str.strip() == sel_cat]
+    _cl = color_df[color_df["Brand"].str.strip().isin(sel_brands)].copy() if sel_brands else color_df.copy()
+    if sel_cats and "Category" in _cl.columns:
+        _cl = _cl[_cl["Category"].str.strip().isin(sel_cats)]
     filtered_products_set = set(prod_sum["Product Name"].str.strip())
     _cl = _cl[_cl["Product Name"].str.strip().isin(filtered_products_set)]
     if not _cl.empty:
@@ -794,9 +814,9 @@ if color_df is not None:
 
 _ps_all = None
 if df_prodstore is not None:
-    _ps_all = df_prodstore[df_prodstore["Brand"].str.strip() == sel_brand].copy()
-    if sel_cat != "All" and "Category" in _ps_all.columns:
-        _ps_all = _ps_all[_ps_all["Category"].str.strip() == sel_cat]
+    _ps_all = df_prodstore[df_prodstore["Brand"].str.strip().isin(sel_brands)].copy() if sel_brands else df_prodstore.copy()
+    if sel_cats and "Category" in _ps_all.columns:
+        _ps_all = _ps_all[_ps_all["Category"].str.strip().isin(sel_cats)]
 
 def _style_sz_status(val):
     return {"Super Fast":"background-color:#1B5E20;color:white","Fast":"background-color:#43A047;color:white",
@@ -839,14 +859,14 @@ st.caption("Total reorder split across stores. Click a product in the popup abov
 if df_prodstore is None:
     st.info("Store sales data not available. Run `fetch_product_store_sales.py` and set GDRIVE_PRODSTORE_ID.")
 else:
-    ps = df_prodstore[df_prodstore["Brand"].str.strip() == sel_brand].copy()
-    if sel_cat != "All" and "Category" in ps.columns:
-        ps = ps[ps["Category"].str.strip() == sel_cat]
+    ps = df_prodstore[df_prodstore["Brand"].str.strip().isin(sel_brands)].copy() if sel_brands else df_prodstore.copy()
+    if sel_cats and "Category" in ps.columns:
+        ps = ps[ps["Category"].str.strip().isin(sel_cats)]
     if search.strip() and "Product Name" in ps.columns:
         ps = ps[ps["Product Name"].str.contains(search.strip(), case=False, na=False)]
 
     if ps.empty:
-        st.info(f"No store sales data for **{sel_brand}** / {sel_cat}.")
+        st.info(f"No store sales data for **{sel_brand}**.")
     else:
         tab_store, tab_catstore = st.tabs(["📍 By Store", "📊 Category × Store"])
 
@@ -991,9 +1011,9 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
             .to_excel(writer, sheet_name="By Store", index=False)
 
 out.seek(0)
-fname = f"reorder_{sel_brand.replace(' ','_')}_{(sel_cat if sel_cat!='All' else 'AllCats').replace(' ','_')}.xlsx"
+fname = f"reorder_{'-'.join(sel_brands) if sel_brands else 'All'}_{('-'.join(sel_cats) if sel_cats else 'AllCats').replace(' ','_')[:30]}.xlsx"
 st.download_button(
-    f"⬇️ Download Full Reorder Plan — {sel_brand} / {sel_cat}",
+    f"⬇️ Download Full Reorder Plan — {sel_brand} / {sel_cat if sel_cats else 'All'}",
     data=out, file_name=fname,
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 st.caption("Download includes: Category Summary · Product Plan · Size Breakdown · Color Breakdown · Store Distribution")
