@@ -809,7 +809,15 @@ if color_df is not None:
     if not _cl.empty:
         _cl = _cl[_cl["Status"].isin(["Super Fast","Fast"])]
         _cl = _cl.sort_values(["Product Name","Units Sold"], ascending=[True,False])
-        # Order (STR) removed
+
+        # Add reorder qty per color — product reorder × color share of sales
+        reorder_map = prod_sum.set_index("Product Name")["Reorder_Velocity"].to_dict()
+        _cl["_prod_reorder"] = _cl["Product Name"].map(reorder_map).fillna(0)
+        _prod_total = _cl.groupby("Product Name")["Units Sold"].transform("sum")
+        _cl["Color Share %"] = (_cl["Units Sold"] / _prod_total.replace(0, float("nan")) * 100).fillna(0).round(1)
+        _cl[f"Order ({cover_days}d)"] = (
+            _cl["_prod_reorder"] * _cl["Color Share %"] / 100
+        ).round().astype(int)
         cl = _cl
 
 _ps_all = None
@@ -846,11 +854,23 @@ st.markdown('<div class="sec">🎨 Color Breakdown by Product</div>', unsafe_all
 if cl.empty:
     st.info("No Fast/Super Fast colors for current filters.")
 else:
-    disp_cl = cl[["Product Name","Color","Units Sold","In Stock","STR %","Status"]].copy()
+    disp_cl_cols = ["Product Name","Color","Units Sold","In Stock","STR %",
+                    "Color Share %","Status",f"Order ({cover_days}d)"]
+    disp_cl_cols = [c for c in disp_cl_cols if c in cl.columns]
+    disp_cl = cl[disp_cl_cols].copy()
+
+    def _style_color_order(val):
+        if isinstance(val,(int,float)) and val > 0:
+            return "background-color:#dbeafe;color:#1e40af;font-weight:700"
+        return ""
+
     _cst = (disp_cl.style
         .map(_style_sz_status, subset=["Status"])
-        .format({"STR %":"{:.1f}%","Units Sold":"{:,.0f}","In Stock":"{:,.0f}"}))
+        .map(_style_color_order, subset=[f"Order ({cover_days}d)"] if f"Order ({cover_days}d)" in disp_cl_cols else [])
+        .format({"STR %":"{:.1f}%","Units Sold":"{:,.0f}","In Stock":"{:,.0f}",
+                 "Color Share %":"{:.1f}%",f"Order ({cover_days}d)":"{:,.0f}"}))
     st.dataframe(_cst, width='stretch', hide_index=True)
+    st.caption(f"{len(cl):,} color rows · Fast/Super Fast only · 🔵 Order = product reorder × color share")
 
 # ── Overall Store Distribution (category-level summary) ──────────────────────
 st.markdown('<div class="sec">🏪 Overall Store Distribution</div>', unsafe_allow_html=True)
