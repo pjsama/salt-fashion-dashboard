@@ -101,6 +101,27 @@ def load_products():
     for col in ["Brand","Category","Sub Category","STR Status","Product Name","Color","Size"]:
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
+
+    # Fix: some products have size embedded in name ("Dress/S", "Top/XL")
+    # but Size column is empty — strip it out and populate Size
+    SIZE_SUFFIXES = {"XS","S","M","L","XL","2XL","3XL","4XL","5XL",
+                     "ONE SIZE","FREE SIZE","36","37","38","39","40","41","42","43","44"}
+    def _fix_name_size(row):
+        name = row["Product Name"]
+        size = row["Size"]
+        if size or "/" not in name:
+            return name, size
+        # Check if suffix after last / is a size
+        parts = name.rsplit("/", 1)
+        suffix = parts[1].strip()
+        if suffix.upper() in SIZE_SUFFIXES:
+            return parts[0].strip(), suffix
+        return name, size
+
+    if "Product Name" in df.columns and "Size" in df.columns:
+        fixed = df.apply(_fix_name_size, axis=1, result_type="expand")
+        df["Product Name"] = fixed[0]
+        df["Size"]         = fixed[1]
     if "Create Date" in df.columns:
         df["Create Date"] = pd.to_datetime(df["Create Date"], errors="coerce")
     SKIP = {"All","Saleable","PoS",""}
