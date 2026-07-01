@@ -32,6 +32,8 @@ GDRIVE_PRODSTORE_ID = "10ZvRKu4icGDw_g95PplVVdKmj_m-Zpo4"
 LOCATION_ORDER = ["Baneshwor","Lazimpat","Kumaripati","Chitwan","Pokhara","Online",
                   "Baneshwor Lush","Chitwan Lush","Pokhara Lush"]
 
+DEFAULT_EXCLUDED_STORES = {"Baneshwor Lush","Chitwan Lush","Pokhara Lush"}
+
 SIZE_ORDER = ["XS","S","M","L","XL","2XL","3XL","4XL","5XL","ONE SIZE","FREE SIZE",
               "36","37","38","39","40","41","42","43","44",
               "7 (2-4 Y)","9 (4-5 Y)","11 (5-7 Y)","13 (7-9 Y)","5 (18-24 M)"]
@@ -312,6 +314,15 @@ with st.sidebar:
         help="velocity × cover_days − stock = reorder qty")
 
     st.markdown("---")
+    excluded_stores = st.multiselect(
+        "Exclude stores",
+        list(LOCATION_ORDER),
+        default=list(DEFAULT_EXCLUDED_STORES),
+        help="Lush stores are cosmetics-focused and skew clothing data"
+    )
+    active_stores = [s for s in LOCATION_ORDER if s not in excluded_stores]
+
+    st.markdown("---")
     n_cat = len(bdf_all["Product Name"].unique())
     st.caption(f"{n_cat} products · {len(bdf_all)} variants in category")
 
@@ -510,36 +521,50 @@ if df_prodstore is not None:
         ps["_order"] = ps["Store"].apply(
             lambda x: LOCATION_ORDER.index(x) if x in LOCATION_ORDER else 99)
         ps = ps.sort_values("_order").drop(columns=["_order"])
-        grand = ps["Units Sold"].sum()
-        ps["Share %"] = (ps["Units Sold"] / grand * 100).round(1) if grand > 0 else 0
-        ps[f"Order ({cover_days}d)"] = (
-            reorder_qty * ps["Share %"] / 100
-        ).round().astype(int)
+        grand = ps.loc[ps["Store"].isin(active_stores), "Units Sold"].sum()
+        ps["Share %"] = ps.apply(
+            lambda r: round(r["Units Sold"] / grand * 100, 1)
+            if r["Store"] in active_stores and grand > 0 else 0, axis=1)
+        ps[f"Order ({cover_days}d)"] = ps.apply(
+            lambda r: round(reorder_qty * r["Share %"] / 100)
+            if r["Store"] in active_stores else 0, axis=1).astype(int)
+        ps["_excl"] = ~ps["Store"].isin(active_stores)
 
         col_tbl, col_bar = st.columns([2,3])
         with col_tbl:
             disp_ps = ps[["Store","Units Sold","Revenue (NPR)","Share %",
                            f"Order ({cover_days}d)"]].copy()
+
+            def _excl_row_style(row):
+                if row.get("Store","") in excluded_stores:
+                    return ["color:#94a3b8;font-style:italic"] * len(row)
+                return [""] * len(row)
+
             st.dataframe(
                 disp_ps.style
+                    .apply(_excl_row_style, axis=1)
                     .map(_style_order, subset=[f"Order ({cover_days}d)"])
                     .format({"Units Sold":"{:,.0f}","Revenue (NPR)":"NPR {:,.0f}",
                              "Share %":"{:.1f}%",f"Order ({cover_days}d)":"{:,.0f}"}),
                 width='stretch', hide_index=True)
-            st.caption(f"Source: product_store_sales.xlsx (all-time)")
+            excl_note = f" · *{', '.join(excluded_stores)} excluded from order*" if excluded_stores else ""
+            st.caption(f"Source: product_store_sales.xlsx (all-time){excl_note}")
 
         with col_bar:
             max_u = ps["Units Sold"].max() or 1
             for _, row in ps.iterrows():
-                pct = row["Units Sold"] / max_u * 100
+                pct       = row["Units Sold"] / max_u * 100
+                is_excl   = row["Store"] in excluded_stores
+                bar_color = "#94a3b8" if is_excl else "#1d4ed8"
+                excl_tag  = ' <span style="font-size:10px;color:#94a3b8">(excl)</span>' if is_excl else ""
                 st.markdown(
                     f'<div style="margin-bottom:5px">'
                     f'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:2px">'
-                    f'<span><strong>{row["Store"]}</strong></span>'
+                    f'<span style="{"color:#94a3b8" if is_excl else ""}"><strong>{row["Store"]}</strong>{excl_tag}</span>'
                     f'<span style="color:#6b7280">{int(row["Units Sold"]):,} units · {row["Share %"]:.0f}%</span>'
                     f'</div>'
                     f'<div style="background:#e2e8f0;border-radius:4px;height:7px">'
-                    f'<div style="background:#1d4ed8;width:{pct:.0f}%;height:7px;border-radius:4px"></div>'
+                    f'<div style="background:{bar_color};width:{pct:.0f}%;height:7px;border-radius:4px"></div>'
                     f'</div></div>', unsafe_allow_html=True)
     else:
         st.info(f"**{sel_product}** has no POS sales recorded in product_store_sales.xlsx.")

@@ -30,6 +30,10 @@ GDRIVE_PRODSTORE_ID = "10ZvRKu4icGDw_g95PplVVdKmj_m-Zpo4"
 LOCATION_ORDER = ["Baneshwor","Lazimpat","Kumaripati","Chitwan","Pokhara","Online",
                   "Baneshwor Lush","Chitwan Lush","Pokhara Lush"]
 
+# Stores excluded from clothing/accessories reorder by default
+# (cosmetics-only locations that skew the data)
+DEFAULT_EXCLUDED_STORES = {"Baneshwor Lush","Chitwan Lush","Pokhara Lush"}
+
 SIZE_ORDER = ["XS","S","M","L","XL","2XL","3XL","4XL","5XL","ONE SIZE","FREE SIZE",
               "36","37","38","39","40","41","42","43","44",
               "7 (2-4 Y)","9 (4-5 Y)","11 (5-7 Y)","13 (7-9 Y)","5 (18-24 M)"]
@@ -382,7 +386,15 @@ with st.sidebar:
     )
 
     st.markdown("---")
-    st.markdown("**📅 Date Added Filter**")
+    st.markdown("**🏪 Store Filter**")
+    all_stores = [s for s in LOCATION_ORDER]
+    excluded_stores = st.multiselect(
+        "Exclude stores",
+        all_stores,
+        default=list(DEFAULT_EXCLUDED_STORES),
+        help="Lush stores are cosmetics-focused and skew clothing/accessories reorder data"
+    )
+    active_stores = [s for s in LOCATION_ORDER if s not in excluded_stores]
     date_opts = ["All time","Last 30 days","Last 60 days","Last 90 days",
                  "Older than 30 days","Older than 60 days","Older than 90 days"]
     sel_date = st.selectbox("Date filter", date_opts, index=0,
@@ -899,6 +911,7 @@ else:
         ps = ps[ps["Category"].str.strip().isin(sel_cats)]
     if search.strip() and "Product Name" in ps.columns:
         ps = ps[ps["Product Name"].str.contains(search.strip(), case=False, na=False)]
+    # Note: excluded stores are shown in table but get Order=0 (see store_totals logic)
 
     if ps.empty:
         st.info(f"No store sales data for **{sel_brand}**.")
@@ -912,16 +925,26 @@ else:
         store_totals["_order"] = store_totals["Store"].apply(
             lambda x: LOCATION_ORDER.index(x) if x in LOCATION_ORDER else 99)
         store_totals = store_totals.sort_values("_order").drop(columns=["_order"])
-        grand_sold   = store_totals["Units_Sold"].sum()
-        store_totals["Share_%"]   = (store_totals["Units_Sold"] / grand_sold * 100).round(1) if grand_sold > 0 else 0
-        store_totals["Order_Vel"] = (store_totals["Share_%"] / 100 * total_units_vel).round().astype(int)
-        # Order_STR removed
         store_totals = store_totals[store_totals["Units_Sold"] > 0]
+
+        # Share % and Order only from active (non-excluded) stores
+        # Lush stores shown for visibility but don't receive reorder allocation
+        active_mask   = store_totals["Store"].isin(active_stores)
+        grand_sold    = store_totals.loc[active_mask, "Units_Sold"].sum()
+        store_totals["Share_%"]   = store_totals.apply(
+            lambda r: round(r["Units_Sold"] / grand_sold * 100, 1)
+            if r["Store"] in active_stores and grand_sold > 0 else 0, axis=1)
+        store_totals["Order_Vel"] = store_totals.apply(
+            lambda r: round(r["Share_%"] / 100 * total_units_vel)
+            if r["Store"] in active_stores else 0, axis=1).astype(int)
+        store_totals["_excluded"] = ~store_totals["Store"].isin(active_stores)
 
         def _style_ord(val):
             return "background-color:#dbeafe;color:#1e40af;font-weight:700" if isinstance(val,(int,float)) and val > 0 else ""
-        def _style_str_ord(val):
-            return "background-color:#ede9fe;color:#5b21b6;font-weight:700" if isinstance(val,(int,float)) and val > 0 else ""
+        def _style_excluded_row(row):
+            if row.get("Store","") in excluded_stores:
+                return ["color:#94a3b8;font-style:italic"] * len(row)
+            return [""] * len(row)
 
         with tab_store:
             col_tbl, col_bar = st.columns([2, 3])
@@ -931,30 +954,37 @@ else:
                     "Order_Vel":f"Order ({cover_days}d)"})
                 st.dataframe(
                     disp_st.style
+                        .apply(_style_excluded_row, axis=1)
                         .map(_style_ord, subset=[f"Order ({cover_days}d)"])
                         .format({"Units Sold":"{:,.0f}","Share %":"{:.1f}%",
                                  f"Order ({cover_days}d)":"{:,.0f}"}),
                     width='stretch', hide_index=True)
-                st.caption(f"Total: {store_totals['Order_Vel'].sum():,} units · {len(store_totals)} stores")
+                active_order_total = store_totals.loc[active_mask, "Order_Vel"].sum()
+                excl_note = f" · *{', '.join(excluded_stores)} shown but excluded from order*" if excluded_stores else ""
+                st.caption(f"Total: {active_order_total:,} units · {active_mask.sum()} active stores{excl_note}")
             with col_bar:
                 max_u = store_totals["Units_Sold"].max() or 1
                 for _, row in store_totals.iterrows():
-                    pct = row["Units_Sold"] / max_u * 100
+                    pct        = row["Units_Sold"] / max_u * 100
+                    is_excl    = row["Store"] in excluded_stores
+                    bar_color  = "#94a3b8" if is_excl else "#1d4ed8"
+                    name_style = "color:#94a3b8;font-style:italic" if is_excl else ""
+                    excl_tag   = ' <span style="font-size:10px;color:#94a3b8">(excluded from order)</span>' if is_excl else ""
                     st.markdown(
                         f'<div style="margin-bottom:6px">'
                         f'<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:2px">'
-                        f'<span><strong>{row["Store"]}</strong></span>'
+                        f'<span style="{name_style}"><strong>{row["Store"]}</strong>{excl_tag}</span>'
                         f'<span style="color:#6b7280">{int(row["Units_Sold"]):,} units · '
-                        f'{row["Share_%"]:.0f}% · <span style="color:#1d4ed8">Order {int(row["Order_Vel"])} (Vel)</span></span>'
+                        f'{row["Share_%"]:.0f}% · <span style="color:{bar_color}">Order {int(row["Order_Vel"])}</span></span>'
                         f'</div>'
                         f'<div style="background:#e2e8f0;border-radius:4px;height:8px">'
-                        f'<div style="background:#1d4ed8;width:{pct:.0f}%;height:8px;border-radius:4px"></div>'
+                        f'<div style="background:{bar_color};width:{pct:.0f}%;height:8px;border-radius:4px"></div>'
                         f'</div></div>', unsafe_allow_html=True)
 
         with tab_catstore:
             grp_key = ["Category","Sub Category","Store"] if "Sub Category" in ps.columns else ["Category","Store"]
             cat_store = ps.groupby(grp_key).agg(Units_Sold=("Units Sold","sum")).reset_index()
-            stores_present = [s for s in LOCATION_ORDER if s in cat_store["Store"].unique()]
+            stores_present = [s for s in active_stores if s in cat_store["Store"].unique()]
             pivot_cols = ["Category","Sub Category"] if "Sub Category" in cat_store.columns else ["Category"]
 
             # ── Units Sold pivot ────────────────────────────────────────────────
@@ -1115,7 +1145,7 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
             try:
                 grp_key_dl = ["Category","Sub Category","Store"] if "Sub Category" in ps.columns else ["Category","Store"]
                 cat_store_dl = ps.groupby(grp_key_dl).agg(Units_Sold=("Units Sold","sum")).reset_index()
-                stores_dl = [s for s in LOCATION_ORDER if s in cat_store_dl["Store"].unique()]
+                stores_dl = [s for s in active_stores if s in cat_store_dl["Store"].unique()]
                 pivot_cols_dl = ["Category","Sub Category"] if "Sub Category" in cat_store_dl.columns else ["Category"]
                 pivot_dl = cat_store_dl.pivot_table(
                     index=pivot_cols_dl, columns="Store", values="Units_Sold",
