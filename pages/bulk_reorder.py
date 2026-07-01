@@ -1002,8 +1002,68 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
         sz_exp.to_excel(writer, sheet_name="By Size", index=False)
 
     if color_df is not None and "cl" in dir() and not cl.empty:
-        cl_exp = cl[["Product Name","Color","Units Sold","In Stock","STR %","Status"]].copy()
-        cl_exp.to_excel(writer, sheet_name="By Color", index=False)
+        # Build color reorder sheet — matches product level data exactly
+        # Get all colors (not just Fast/Super Fast) for the export
+        _cl_all = color_df[color_df["Brand"].str.strip().isin(sel_brands)].copy() if sel_brands else color_df.copy()
+        if sel_cats:
+            _cl_all = _cl_all[_cl_all["Category"].str.strip().isin(sel_cats)]
+        if sel_subs:
+            _cl_all = _cl_all[_cl_all["Sub Category"].str.strip().isin(sel_subs)]
+        # Only keep products that are in our filtered prod_sum
+        _cl_all = _cl_all[_cl_all["Product Name"].str.strip().isin(
+            set(prod_sum["Product Name"].str.strip()))]
+
+        if not _cl_all.empty:
+            # Merge product-level data (velocity, trend, order qty) onto color rows
+            prod_export_cols = ["Product Name","Brand","Category","Sub Category",
+                                "STR_Status","STR_Pct","Total_Sold","Net_Sales",
+                                "Daily_Velocity","Weekly_Rate","Vel_Tier",
+                                "Total_Stock","Reorder_Velocity","Avg_Price"]
+            prod_export_cols = [c for c in prod_export_cols if c in prod_sum.columns]
+            _prod_for_color  = prod_sum[prod_export_cols].copy()
+
+            cl_exp = _cl_all.merge(_prod_for_color, on="Product Name", how="left",
+                                   suffixes=("","_prod"))
+
+            # Share of this color within the product
+            _color_totals = _cl_all.groupby("Product Name")["Units Sold"].sum().rename("_color_total")
+            cl_exp = cl_exp.merge(_color_totals, on="Product Name", how="left")
+            cl_exp["Color Share %"] = (
+                cl_exp["Units Sold"] / cl_exp["_color_total"].replace(0, float("nan")) * 100
+            ).fillna(0).round(1)
+
+            # Distribute product reorder by color share
+            cl_exp[f"Order ({cover_days}d)"] = (
+                cl_exp["Reorder_Velocity"].fillna(0) *
+                cl_exp["Color Share %"] / 100
+            ).round().astype(int)
+
+            # Clean and rename for export
+            cl_exp = cl_exp.rename(columns={
+                "STR_Status":"Status","STR_Pct":"STR % (product)",
+                "Total_Sold":"Total Units Sold","Net_Sales":net_lbl,
+                "Daily_Velocity":"Velocity (u/day)","Weekly_Rate":"Rate/wk",
+                "Vel_Tier":"Trend","Total_Stock":"Total Stock",
+                "Reorder_Velocity":"Product Order","Avg_Price":"Avg Price",
+                "STR %":"STR % (color)","Units Sold":"Units Sold (color)",
+                "In Stock":"In Stock (color)",
+            })
+
+            export_cols = [
+                "Product Name","Brand","Category","Sub Category",
+                "Color","Units Sold (color)","In Stock (color)",
+                "STR % (color)","Status","Color Share %",
+                "Total Units Sold","STR % (product)",net_lbl,
+                "Velocity (u/day)","Rate/wk","Trend",
+                "Total Stock","Product Order",f"Order ({cover_days}d)","Avg Price"
+            ]
+            export_cols = [c for c in export_cols if c in cl_exp.columns]
+            cl_exp[export_cols].sort_values(
+                ["Product Name","Units Sold (color)"], ascending=[True, False]
+            ).to_excel(writer, sheet_name="By Color + Reorder", index=False)
+        else:
+            cl[["Product Name","Color","Units Sold","In Stock","STR %","Status"]].to_excel(
+                writer, sheet_name="By Color + Reorder", index=False)
 
     if df_prodstore is not None and "store_totals" in dir() and not store_totals.empty:
         store_totals.rename(columns={"Units_Sold":"Units Sold","Share_%":"Share %",
@@ -1016,4 +1076,4 @@ st.download_button(
     f"⬇️ Download Full Reorder Plan — {sel_brand} / {sel_cat if sel_cats else 'All'}",
     data=out, file_name=fname,
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-st.caption("Download includes: Category Summary · Product Plan · Size Breakdown · Color Breakdown · Store Distribution")
+st.caption("Download includes: Category Summary · Product Plan · Size Breakdown · **Color + Reorder** · Store Distribution")
