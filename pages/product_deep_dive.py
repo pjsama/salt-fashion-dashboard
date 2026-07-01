@@ -550,25 +550,58 @@ else:
 st.markdown('<div class="sec">📋 Full SKU Breakdown — Every Size × Color from Odoo</div>',
             unsafe_allow_html=True)
 
-sku_rows = prod_rows[["Color","Size","SKU / Variant","On Hand Qty",
-                       "Total Units Sold","Sell-Through %","STR Status","Sales Price",
-                       "Days of Cover","DOC Status"]].copy()
+# prod_rows already has fixed names from load_products()
+# But Size/Color may still be empty for products with name-embedded variants
+sku_df = prod_rows.copy()
+
+# If Size is empty but was embedded in original name, it was already fixed in load_products
+# Ensure we show meaningful Size/Color
+_sku_cols = ["Color","Size","SKU / Variant","On Hand Qty","Total Units Sold",
+             "Sell-Through %","STR Status","Sales Price"]
+_sku_cols = [c for c in _sku_cols if c in sku_df.columns]
+
+# Check for optional columns
+optional = {"Days of Cover":"DOC", "DOC Status":"DOC Status"}
+for src, dst in optional.items():
+    if src in sku_df.columns:
+        _sku_cols.append(src)
+
+sku_rows = sku_df[_sku_cols].copy()
 sku_rows = sku_rows.rename(columns={
     "SKU / Variant":"SKU","On Hand Qty":"On Hand",
     "Total Units Sold":"Units Sold","Sell-Through %":"STR %",
-    "STR Status":"Status","Sales Price":"Price","Days of Cover":"DOC","DOC Status":"DOC Status"
+    "STR Status":"Status","Sales Price":"Price",
+    "Days of Cover":"DOC"
 })
-sku_rows["_sk"] = sku_rows["Size"].apply(lambda s: SIZE_ORDER.index(s) if s in SIZE_ORDER else 99)
-sku_rows = sku_rows.sort_values(["Color","_sk"]).drop(columns=["_sk"])
 
-st.dataframe(
-    sku_rows.style
-        .map(_style_status, subset=["Status"])
-        .map(_style_stock,  subset=["On Hand"])
-        .map(_style_str,    subset=["STR %"])
-        .format({"STR %":"{:.1f}%","Units Sold":"{:,.0f}","On Hand":"{:,.0f}",
-                 "Price":"NPR {:,.0f}"}),
-    width='stretch', hide_index=True)
+# Sort: Color then Size
+sku_rows["_sk"] = sku_rows.get("Size", pd.Series(dtype=str)).apply(
+    lambda s: SIZE_ORDER.index(s) if s in SIZE_ORDER else 99)
+sku_rows = sku_rows.sort_values(
+    [c for c in ["Color","_sk"] if c in sku_rows.columns]
+).drop(columns=["_sk"])
+
+# Replace empty Color with "—"
+if "Color" in sku_rows.columns:
+    sku_rows["Color"] = sku_rows["Color"].replace("", "—").fillna("—")
+if "Size" in sku_rows.columns:
+    sku_rows["Size"] = sku_rows["Size"].replace("", "—").fillna("—")
+
+fmt_sku = {"STR %":"{:.1f}%","Units Sold":"{:,.0f}","On Hand":"{:,.0f}",
+           "Price":"NPR {:,.0f}"}
+if "DOC" in sku_rows.columns:
+    fmt_sku["DOC"] = "{:.1f}"
+
+style_cols = {}
+if "Status"  in sku_rows.columns: style_cols["Status"]  = _style_status
+if "On Hand" in sku_rows.columns: style_cols["On Hand"] = _style_stock
+if "STR %"   in sku_rows.columns: style_cols["STR %"]   = _style_str
+
+_sty = sku_rows.style
+for col, fn in style_cols.items():
+    _sty = _sty.map(fn, subset=[col])
+
+st.dataframe(_sty.format(fmt_sku), width='stretch', hide_index=True)
 st.caption(f"{len(sku_rows)} variants total")
 
 # ── Download ──────────────────────────────────────────────────────────────────
