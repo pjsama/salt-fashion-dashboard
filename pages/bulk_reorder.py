@@ -403,7 +403,7 @@ if sel_date != "All time" and "Create Date" in bdf.columns:
     elif "Older than 90" in sel_date:    bdf = bdf[cd < today - pd.Timedelta(days=90)]
 
 # ── Build product-level summary ───────────────────────────────────────────────
-grp_cols = ["Product Name","Category"]
+grp_cols = ["Product Name","Brand","Category"]
 if "Sub Category" in bdf.columns: grp_cols.append("Sub Category")
 
 prod_sum = bdf.groupby(grp_cols).agg(
@@ -739,7 +739,7 @@ else:
 
 st.markdown('<div class="sec">📋 Product-Level Reorder Plan</div>', unsafe_allow_html=True)
 
-show_cols = ["Product Name","Category"] + \
+show_cols = ["Product Name","Brand","Category"] + \
     (["Sub Category"] if has_sub else []) + \
     ["STR_Status","STR_Pct","Total_Sold","Net_Sales",
      "Daily_Velocity","Weekly_Rate","Vel_Tier","Total_Stock",
