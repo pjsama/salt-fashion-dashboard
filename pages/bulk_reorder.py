@@ -586,6 +586,21 @@ else:
     if _sz_cat.empty:
         st.info("No size data for current filters.")
     else:
+        # Style functions needed for dataframe styling
+        def _sz_reorder_style(val):
+            if isinstance(val,(int,float)) and val > 0:
+                return "background-color:#dbeafe;color:#1e40af;font-weight:700"
+            return ""
+        def _sz_stock_style(val):
+            if isinstance(val,(int,float)) and val == 0:
+                return "background-color:#fee2e2;color:#991b1b"
+            return ""
+        def _sz_str_style(val):
+            if not isinstance(val,(int,float)): return ""
+            if val >= 70: return "background-color:#dcfce7;color:#166534"
+            if val >= 30: return "background-color:#fef9c3;color:#854d0e"
+            return "background-color:#fee2e2;color:#991b1b"
+
         # Aggregate by Category + Sub Category + Size
         sz_grp = ["Category"]
         if "Sub Category" in _sz_cat.columns and _sz_cat["Sub Category"].str.strip().ne("").any():
