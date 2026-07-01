@@ -830,7 +830,7 @@ show_cols = ["Product Name","Brand","Category"] + \
     (["Sub Category"] if has_sub else []) + \
     ["STR_Status","STR_Pct","Total_Sold","Net_Sales",
      "Daily_Velocity","Weekly_Rate","Vel_Tier",
-     "Launch Date","Days Live","Last Sold","Days Not Sold",
+     "Launch Date","Days Live","Last Sold",
      "Total_Stock","Reorder_Velocity","Avg_Price","Est_Value"]
 show_cols = [c for c in show_cols if c in prod_sum.columns]
 
@@ -839,7 +839,7 @@ disp = prod_sum[show_cols].copy().rename(columns={
     "Net_Sales":net_lbl,"Daily_Velocity":"Velocity (u/day)",
     "Weekly_Rate":"Rate/wk","Vel_Tier":"Trend",
     "Launch Date":"Launch Date","Days Live":"Days Live",
-    "Last Sold":"Last Sold","Days Not Sold":"Days Not Sold",
+    "Last Sold":"Last Sold",
     "Total_Stock":"In Stock",
     "Reorder_Velocity":f"Order ({cover_days}d)",
     "Avg_Price":"Avg Price","Est_Value":"Est. Value"
@@ -889,8 +889,7 @@ def _style_days_live(val):
 fmt_d = {"STR %":"{:.1f}%","Units Sold":"{:,.0f}","In Stock":"{:,.0f}",
          net_lbl:"{:,.0f}","Velocity (u/day)":"{:.3f}",
          "Rate/wk":"{:.2f}","Avg Price":"NPR {:,.0f}","Est. Value":"{:,.0f}",
-         f"Order ({cover_days}d)":"{:,.0f}",
-         "Days Not Sold":"{:,.0f}","Days Live":"{:,.0f}"}
+         f"Order ({cover_days}d)":"{:,.0f}","Days Live":"{:,.0f}"}
 _st = disp.style.map(_style_status, subset=["Status"])
 if f"Order ({cover_days}d)" in disp.columns: _st = _st.map(_style_order,     subset=[f"Order ({cover_days}d)"])
 if "Velocity (u/day)"       in disp.columns: _st = _st.map(_vel_style,       subset=["Velocity (u/day)"])
@@ -1159,7 +1158,7 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                    (["Sub Category"] if "Sub Category" in prod_sum.columns else []) +
                    ["STR_Status","STR_Pct","Total_Sold","Net_Sales",
                     "Daily_Velocity","Weekly_Rate","Vel_Tier",
-                    "Launch Date","Days Live","Last Sold","Days Not Sold",
+                    "Launch Date","Days Live","Last Sold",
                     "Total_Stock","Reorder_Velocity","Avg_Price","Est_Value"]].copy()
     full = full.rename(columns={"STR_Status":"Status","STR_Pct":"STR %",
                                 "Total_Sold":"Units Sold","Total_Stock":"In Stock",
