@@ -367,16 +367,17 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("**📈 Velocity Settings**")
-    velocity_days = st.slider(
-        "Sales lookback window (days)", 30, 180, 60,
-        step=15,
+
+    # Only show windows we actually have data for in the export
+    _vel_options = [60, 90]
+    velocity_days = st.select_slider(
+        "Sales lookback window (days)", options=_vel_options, value=60,
         help=(
             "Sets the window for calculating daily sell rate.\n\n"
-            "**30d** = recent momentum (aggressive — good mid-season)\n"
-            "**60d** = balanced (recommended)\n"
-            "**90d** = smoothed average (conservative)\n\n"
-            "Products newer than this window use their full lifetime.\n"
-            "Reorder = velocity × 60 days − current stock."
+            "**60d** = balanced (recommended) — uses Recent Sold 60d\n"
+            "**90d** = smoothed average (conservative) — uses Recent Sold 90d\n\n"
+            "Export only contains 60d and 90d windows. "
+            "Run a fresh export to get updated data."
         )
     )
     cover_days = st.slider(
