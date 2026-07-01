@@ -555,42 +555,6 @@ prod_sum["Net_Sales"] = (prod_sum["Recent_60"]
 prod_sum["weeks_live"]  = (prod_sum["days_live"] / 7).clip(lower=1)
 prod_sum["Est_Value"]   = prod_sum["Reorder_Velocity"] * prod_sum["Avg_Price"]
 
-# ── Last sold signal from Recent Sold windows ─────────────────────────────────
-# We don't have last_sold_date directly, but we can infer from 60d/90d windows:
-#   Recent_60 > 0  → sold within 60d of export date
-#   Recent_60 = 0, Recent_90 > 0 → sold 60–90d ago
-#   Recent_90 = 0, Total_Sold > 0 → last sold > 90d ago
-#   Total_Sold = 0 → never sold
-# Export date is embedded in the filename; approximate as today - export_staleness
-has_recent_90 = "Recent Sold 90d" in bdf.columns
-
-if has_recent_90:
-    recent_90 = bdf.groupby(grp_cols).agg(
-        Recent_90 = ("Recent Sold 90d", "sum"),
-    ).reset_index()
-    prod_sum = prod_sum.merge(recent_90, on=grp_cols, how="left")
-    prod_sum["Recent_90"] = prod_sum["Recent_90"].fillna(0)
-else:
-    prod_sum["Recent_90"] = 0
-
-def _last_sold_signal(r):
-    """Approximate last sold date signal from export windows."""
-    if r["Total_Sold"] == 0:
-        return "Never sold", 9999
-    r60 = r.get("Recent_60", 0) if has_recent else 0
-    r90 = r.get("Recent_90", 0) if has_recent_90 else 0
-    if r60 > 0:
-        return f"< 60d ago", 30   # within export 60d window
-    elif r90 > 0:
-        return f"60–90d ago", 75  # sold in 60-90d window
-    elif r["Total_Sold"] > 0:
-        return "> 90d ago", 120   # last sale over 90 days ago
-    return "Unknown", 999
-
-signals = prod_sum.apply(_last_sold_signal, axis=1, result_type="expand")
-prod_sum["Last Sold"]      = signals[0]
-prod_sum["_days_not_sold"] = signals[1]
-
 # Apply STR filter
 prod_sum = prod_sum[prod_sum["STR_Pct"] >= min_str_pct]
 if not show_zero:
@@ -805,15 +769,14 @@ st.markdown('<div class="sec">📋 Product-Level Reorder Plan</div>', unsafe_all
 show_cols = ["Product Name","Brand","Category"] + \
     (["Sub Category"] if has_sub else []) + \
     ["STR_Status","STR_Pct","Total_Sold","Net_Sales",
-     "Daily_Velocity","Weekly_Rate","Vel_Tier","Last Sold",
-     "Total_Stock","Reorder_Velocity","Avg_Price","Est_Value"]
+     "Daily_Velocity","Weekly_Rate","Vel_Tier","Total_Stock",
+     "Reorder_Velocity","Avg_Price","Est_Value"]
 show_cols = [c for c in show_cols if c in prod_sum.columns]
 
 disp = prod_sum[show_cols].copy().rename(columns={
     "STR_Status":"Status","STR_Pct":"STR %","Total_Sold":"Units Sold",
     "Net_Sales":net_lbl,"Daily_Velocity":"Velocity (u/day)",
     "Weekly_Rate":"Rate/wk","Vel_Tier":"Trend",
-    "Last Sold":"Last Sold",
     "Total_Stock":"In Stock",
     "Reorder_Velocity":f"Order ({cover_days}d)",
     "Avg_Price":"Avg Price","Est_Value":"Est. Value"
@@ -829,22 +792,13 @@ def _style_order(val):
         return "background-color:#dbeafe;color:#1e40af;font-weight:700"
     return ""
 
-def _style_last_sold(val):
-    if not isinstance(val, str): return ""
-    if "< 60d"   in val: return "color:#16a34a;font-weight:600"   # green — recent
-    if "60–90d"  in val: return "color:#d97706;font-weight:600"   # amber — getting old
-    if "> 90d"   in val: return "color:#dc2626;font-weight:600"   # red — stale
-    if "Never"   in val: return "color:#9ca3af"                   # grey — never sold
-    return ""
-
 fmt_d = {"STR %":"{:.1f}%","Units Sold":"{:,.0f}","In Stock":"{:,.0f}",
          net_lbl:"{:,.0f}","Velocity (u/day)":"{:.3f}",
          "Rate/wk":"{:.2f}","Avg Price":"NPR {:,.0f}","Est. Value":"{:,.0f}",
          f"Order ({cover_days}d)":"{:,.0f}"}
 _st = disp.style.map(_style_status, subset=["Status"])
-if f"Order ({cover_days}d)" in disp.columns: _st = _st.map(_style_order,     subset=[f"Order ({cover_days}d)"])
-if "Velocity (u/day)"       in disp.columns: _st = _st.map(_vel_style,       subset=["Velocity (u/day)"])
-if "Last Sold"              in disp.columns: _st = _st.map(_style_last_sold, subset=["Last Sold"])
+if f"Order ({cover_days}d)" in disp.columns: _st = _st.map(_style_order, subset=[f"Order ({cover_days}d)"])
+if "Velocity (u/day)"       in disp.columns: _st = _st.map(_vel_style,   subset=["Velocity (u/day)"])
 st.dataframe(_st.format(fmt_d), width='stretch', hide_index=True)
 st.caption(f"{len(disp):,} products · 🔵 Order ({cover_days}d) = velocity × {cover_days}d − stock · velocity = {net_lbl} ÷ {velocity_days}d")
 
@@ -1098,14 +1052,13 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
     full = prod_sum[["Product Name","Brand","Category"] +
                    (["Sub Category"] if "Sub Category" in prod_sum.columns else []) +
                    ["STR_Status","STR_Pct","Total_Sold","Net_Sales",
-                    "Daily_Velocity","Weekly_Rate","Vel_Tier","Last Sold",
-                    "days_live","Total_Stock","Reorder_Velocity","Avg_Price","Est_Value"]].copy()
+                    "Daily_Velocity","Weekly_Rate","Vel_Tier","Total_Stock",
+                    "Reorder_Velocity","Avg_Price","Est_Value"]].copy()
     full = full.rename(columns={"STR_Status":"Status","STR_Pct":"STR %",
                                 "Total_Sold":"Units Sold","Total_Stock":"In Stock",
                                 "Weekly_Rate":"Rate/wk","Vel_Tier":"Trend",
                                 "Reorder_Velocity":f"Order ({cover_days}d)",
                                 "Net_Sales":net_lbl,"Daily_Velocity":"Velocity (u/day)",
-                                "days_live":"Days Live",
                                 "Avg_Price":"Avg Price NPR",
                                 "Est_Value":"Est. Value NPR"})
     full.to_excel(writer, sheet_name="Product Reorder Plan", index=False)
