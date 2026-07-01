@@ -109,13 +109,12 @@ def load_products():
     def _fix_name_size(row):
         name = row["Product Name"]
         size = row["Size"]
-        if size or "/" not in name:
+        if "/" not in name:
             return name, size
-        # Check if suffix after last / is a size
         parts = name.rsplit("/", 1)
         suffix = parts[1].strip()
         if suffix.upper() in SIZE_SUFFIXES:
-            return parts[0].strip(), suffix
+            return parts[0].strip(), size if size else suffix
         return name, size
 
     if "Product Name" in df.columns and "Size" in df.columns:
@@ -167,14 +166,17 @@ def load_variants():
                               .str.strip('"'))
 
         # Strip size suffix from product name where it's embedded (e.g. "Dress/S")
+        # Always strip if the suffix is a known size — even if Size column is already populated
         def _fix_variant_name(row):
             name = row["Product Name"]
             size = str(row.get("Size","")).strip() if "Size" in row.index else ""
-            if size or "/" not in name: return name, size
+            if "/" not in name:
+                return name, size
             parts = name.rsplit("/", 1)
             suffix = parts[1].strip()
             if suffix.upper() in SIZE_SUFFIXES_SET:
-                return parts[0].strip(), suffix
+                # Strip suffix from name; keep existing size or use suffix
+                return parts[0].strip(), size if size else suffix
             return name, size
 
         if "Size" in df.columns:
