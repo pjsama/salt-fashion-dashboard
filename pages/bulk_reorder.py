@@ -596,14 +596,41 @@ else:
             Units_Sold = ("Units Sold", "sum"),
             In_Stock   = ("In Stock",   "sum"),
         )
-        sz_cat_agg["STR %"]      = (sz_cat_agg["Units_Sold"] /
+        sz_cat_agg["STR %"] = (sz_cat_agg["Units_Sold"] /
             (sz_cat_agg["Units_Sold"] + sz_cat_agg["In_Stock"]).replace(0, float("nan")) * 100
         ).fillna(0).round(1)
-        sz_cat_agg["Reorder"]  = (sz_cat_agg["Units_Sold"] - sz_cat_agg["In_Stock"]).clip(lower=0).round().astype(int)
-        # Rate/wk: use avg days_live from prod_sum (lifetime, not recent window)
-        # size_df has no recent sales data — lifetime rate is the honest number
+
+        # Rate/wk (lifetime) — size_df has no recent data, use lifetime avg days
         avg_days_live = prod_sum["days_live"].mean() if "days_live" in prod_sum.columns else 365
-        sz_cat_agg["Rate/wk (lifetime)"] = (sz_cat_agg["Units_Sold"] / max(avg_days_live, 1) * 7).round(2)
+        sz_cat_agg["Rate/wk"] = (sz_cat_agg["Units_Sold"] / max(avg_days_live, 1) * 7).round(2)
+
+        # Reorder — use same velocity logic as category summary:
+        # Distribute each category's total Order(60d) proportionally by size's share of Units Sold
+        # This keeps size reorder CONSISTENT with category reorder total
+        #
+        # Build cat_key → Order(60d) lookup from cat_sum
+        cat_order_lookup = {}
+        for _, r in cat_sum.iterrows():
+            key = tuple(str(r.get(c,"")).strip() for c in cat_grp)
+            cat_order_lookup[key] = float(r.get(f"Order ({cover_days}d)", 0) or 0)
+
+        def _size_reorder(row):
+            # Find this size's category group
+            key = tuple(str(row.get(c,"")).strip() for c in sz_grp[:-1])  # exclude Size
+            cat_total_order = cat_order_lookup.get(key, 0)
+            if cat_total_order == 0:
+                return 0
+            # This category's total units sold across all sizes
+            cat_mask = pd.Series(True, index=sz_cat_agg.index)
+            for ci, c in enumerate(sz_grp[:-1]):
+                cat_mask = cat_mask & (sz_cat_agg[sz_grp[ci]] == row[sz_grp[ci]])
+            cat_total_sold = sz_cat_agg.loc[cat_mask, "Units_Sold"].sum()
+            if cat_total_sold == 0:
+                return 0
+            size_share = row["Units_Sold"] / cat_total_sold
+            return round(cat_total_order * size_share)
+
+        sz_cat_agg["Reorder"] = sz_cat_agg.apply(_size_reorder, axis=1).astype(int)
 
         # Sort sizes correctly
         sz_cat_agg["_sk"] = sz_cat_agg["Size"].apply(
@@ -612,24 +639,9 @@ else:
             sz_grp[:-1] + ["_sk"], ascending=True
         ).drop(columns=["_sk"])
 
-        sz_cat_agg = sz_cat_agg.rename(columns={
-            "Units_Sold":"Units Sold","In_Stock":"In Stock"})
+        sz_cat_agg = sz_cat_agg.rename(columns={"Units_Sold":"Units Sold","In_Stock":"In Stock"})
 
-        def _sz_reorder_style(val):
-            if isinstance(val,(int,float)) and val > 0:
-                return "background-color:#dbeafe;color:#1e40af;font-weight:700"
-            return ""
-        def _sz_stock_style(val):
-            if isinstance(val,(int,float)) and val == 0:
-                return "background-color:#fee2e2;color:#991b1b"
-            return ""
-        def _sz_str_style(val):
-            if not isinstance(val,(int,float)): return ""
-            if val >= 70: return "background-color:#dcfce7;color:#166534"
-            if val >= 30: return "background-color:#fef9c3;color:#854d0e"
-            return "background-color:#fee2e2;color:#991b1b"
-
-        disp_sz_cat = [c for c in sz_grp + ["Units Sold","In Stock","STR %","Rate/wk (lifetime)","Reorder"]
+        disp_sz_cat = [c for c in sz_grp + ["Units Sold","In Stock","STR %","Rate/wk","Reorder"]
                        if c in sz_cat_agg.columns]
 
         st.dataframe(
@@ -638,13 +650,12 @@ else:
                 .map(_sz_stock_style,   subset=["In Stock"])
                 .map(_sz_str_style,     subset=["STR %"])
                 .format({"Units Sold":"{:,.0f}","In Stock":"{:,.0f}",
-                         "STR %":"{:.1f}%","Rate/wk (lifetime)":"{:.2f}","Reorder":"{:,.0f}"}),
+                         "STR %":"{:.1f}%","Rate/wk":"{:.2f}","Reorder":"{:,.0f}"}),
             width='stretch', hide_index=True)
         st.caption(
-            f"{len(sz_cat_agg):,} category-size rows · "
-            f"🔵 Reorder = units sold − stock (STR restore) · "
-            f"🔴 Red stock = sold out · "
-            f"Rate/wk = lifetime average rate"
+            f"{len(sz_cat_agg):,} size rows · "
+            f"🔵 Reorder = category Order({cover_days}d) split proportionally by size · "
+            f"🔴 Red stock = sold out · Rate/wk = lifetime average"
         )
 
 
