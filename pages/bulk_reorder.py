@@ -152,6 +152,10 @@ def load_variants():
             color_df = pd.read_excel(local, sheet_name="Color Breakdown", engine="openpyxl")
     if size_df is None: return None, None
 
+    SIZE_SUFFIXES_SET = {"XS","S","M","L","XL","2XL","3XL","4XL","5XL",
+                         "ONE SIZE","FREE SIZE","36","37","38","39","40",
+                         "41","42","43","44"}
+
     def _prep(df):
         df = df.copy()
         df.columns = [c.strip() for c in df.columns]
@@ -161,6 +165,22 @@ def load_variants():
                               .str.replace(r'\s+',' ',regex=True)
                               .str.strip()
                               .str.strip('"'))
+
+        # Strip size suffix from product name where it's embedded (e.g. "Dress/S")
+        def _fix_variant_name(row):
+            name = row["Product Name"]
+            size = str(row.get("Size","")).strip() if "Size" in row.index else ""
+            if size or "/" not in name: return name, size
+            parts = name.rsplit("/", 1)
+            suffix = parts[1].strip()
+            if suffix.upper() in SIZE_SUFFIXES_SET:
+                return parts[0].strip(), suffix
+            return name, size
+
+        if "Size" in df.columns:
+            fixed = df.apply(_fix_variant_name, axis=1, result_type="expand")
+            df["Product Name"] = fixed[0]
+            df["Size"]         = fixed[1]
         for col in ["Units Sold","In Stock","STR %"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
@@ -744,14 +764,17 @@ if size_df is not None:
     if not _sz.empty:
         _sz["_sk"] = _sz["Size"].apply(lambda s: SIZE_ORDER.index(s) if s in SIZE_ORDER else 99)
         _sz = _sz.sort_values(["Product Name","_sk"]).drop(columns=["_sk"])
-        rate_map = prod_sum.set_index("Product Name")["Weekly_Rate"].to_dict()
-        _sz["_prod_rate"] = _sz["Product Name"].map(rate_map).fillna(0)
+        rate_map    = prod_sum.set_index("Product Name")["Weekly_Rate"].to_dict()
+        reorder_map = prod_sum.set_index("Product Name")["Reorder_Velocity"].to_dict()
+        _sz["_prod_rate"]    = _sz["Product Name"].map(rate_map).fillna(0)
+        _sz["_prod_reorder"] = _sz["Product Name"].map(reorder_map).fillna(0)
         prod_total_sold = _sz.groupby("Product Name")["Units Sold"].transform("sum")
         _sz["_size_share"] = (_sz["Units Sold"] / prod_total_sold.replace(0, float("nan"))).fillna(
             1.0 / _sz.groupby("Product Name")["Units Sold"].transform("count"))
-        _sz["Weekly Rate"] = (_sz["_prod_rate"] * _sz["_size_share"]).round(2)
-        _sz["Order (Vel)"] = (_sz["Weekly Rate"] / 7 * cover_days - _sz["In Stock"]).clip(lower=0).round().astype(int)
-        # Order (STR) removed — velocity-only now
+        _sz["Weekly Rate"] = (_sz["_prod_rate"]    * _sz["_size_share"]).round(2)
+        # Order (Vel) = product's Reorder_Velocity (velocity-based, respects tiers)
+        # split by this size's share of product sales — consistent with category breakdown
+        _sz["Order (Vel)"] = (_sz["_prod_reorder"] * _sz["_size_share"]).round().astype(int)
         sz = _sz
 
 cl = pd.DataFrame()
