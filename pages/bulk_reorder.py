@@ -555,41 +555,55 @@ prod_sum["Net_Sales"] = (prod_sum["Recent_60"]
 prod_sum["weeks_live"]  = (prod_sum["days_live"] / 7).clip(lower=1)
 prod_sum["Est_Value"]   = prod_sum["Reorder_Velocity"] * prod_sum["Avg_Price"]
 
-# ── Last sold signal from Recent Sold windows ─────────────────────────────────
-# We don't have last_sold_date directly, but we can infer from 60d/90d windows:
-#   Recent_60 > 0  → sold within 60d of export date
-#   Recent_60 = 0, Recent_90 > 0 → sold 60–90d ago
-#   Recent_90 = 0, Total_Sold > 0 → last sold > 90d ago
-#   Total_Sold = 0 → never sold
-# Export date is embedded in the filename; approximate as today - export_staleness
-has_recent_90 = "Recent Sold 90d" in bdf.columns
+# ── Last sold date — exact from export or estimated from windows ──────────────
+has_last_sold = "Last Sold Date" in bdf.columns and "Days Not Sold" in bdf.columns
 
-if has_recent_90:
-    recent_90 = bdf.groupby(grp_cols).agg(
-        Recent_90 = ("Recent Sold 90d", "sum"),
+if has_last_sold:
+    # Use exact values from enriched export
+    last_sold_agg = bdf.groupby(grp_cols).agg(
+        _Last_Sold_Date = ("Last Sold Date", lambda x: x.dropna().max()),  # most recent
+        _Days_Not_Sold  = ("Days Not Sold",  lambda x: pd.to_numeric(x, errors="coerce").min()),  # least stale
     ).reset_index()
-    prod_sum = prod_sum.merge(recent_90, on=grp_cols, how="left")
-    prod_sum["Recent_90"] = prod_sum["Recent_90"].fillna(0)
+    prod_sum = prod_sum.merge(last_sold_agg, on=grp_cols, how="left")
+
+    def _last_sold_label(r):
+        d = r.get("_Days_Not_Sold")
+        date = r.get("_Last_Sold_Date", "")
+        if r["Total_Sold"] == 0:   return "Never sold"
+        if pd.isna(d) or d is None: return "> 90d ago"
+        d = int(d)
+        if d == 0:   return f"Today"
+        if d <= 7:   return f"{d}d ago"
+        if d <= 30:  return f"{d}d ago"
+        if d <= 90:  return f"{d}d ago"
+        return f"{d}d ago"
+
+    prod_sum["Last Sold"]      = prod_sum.apply(_last_sold_label, axis=1)
+    prod_sum["Days Not Sold"]  = prod_sum["_Days_Not_Sold"].fillna(9999).astype(int)
+    prod_sum["_days_not_sold"] = prod_sum["Days Not Sold"]
+
 else:
-    prod_sum["Recent_90"] = 0
+    # Fallback: estimate from Recent Sold windows
+    has_recent_90 = "Recent Sold 90d" in bdf.columns
+    if has_recent_90:
+        recent_90 = bdf.groupby(grp_cols).agg(Recent_90=("Recent Sold 90d","sum")).reset_index()
+        prod_sum  = prod_sum.merge(recent_90, on=grp_cols, how="left")
+        prod_sum["Recent_90"] = prod_sum["Recent_90"].fillna(0)
+    else:
+        prod_sum["Recent_90"] = 0
 
-def _last_sold_signal(r):
-    """Approximate last sold date signal from export windows."""
-    if r["Total_Sold"] == 0:
-        return "Never sold", 9999
-    r60 = r.get("Recent_60", 0) if has_recent else 0
-    r90 = r.get("Recent_90", 0) if has_recent_90 else 0
-    if r60 > 0:
-        return f"< 60d ago", 30   # within export 60d window
-    elif r90 > 0:
-        return f"60–90d ago", 75  # sold in 60-90d window
-    elif r["Total_Sold"] > 0:
-        return "> 90d ago", 120   # last sale over 90 days ago
-    return "Unknown", 999
+    def _last_sold_signal(r):
+        if r["Total_Sold"] == 0:   return "Never sold", 9999
+        r60 = r.get("Recent_60", 0) if has_recent else 0
+        r90 = r.get("Recent_90", 0)
+        if r60 > 0:  return "< 60d ago", 30
+        elif r90 > 0: return "60–90d ago", 75
+        else:         return "> 90d ago", 120
 
-signals = prod_sum.apply(_last_sold_signal, axis=1, result_type="expand")
-prod_sum["Last Sold"]      = signals[0]
-prod_sum["_days_not_sold"] = signals[1]
+    signals = prod_sum.apply(_last_sold_signal, axis=1, result_type="expand")
+    prod_sum["Last Sold"]      = signals[0]
+    prod_sum["Days Not Sold"]  = signals[1]
+    prod_sum["_days_not_sold"] = signals[1]
 
 # Apply STR filter
 prod_sum = prod_sum[prod_sum["STR_Pct"] >= min_str_pct]
@@ -805,7 +819,7 @@ st.markdown('<div class="sec">📋 Product-Level Reorder Plan</div>', unsafe_all
 show_cols = ["Product Name","Brand","Category"] + \
     (["Sub Category"] if has_sub else []) + \
     ["STR_Status","STR_Pct","Total_Sold","Net_Sales",
-     "Daily_Velocity","Weekly_Rate","Vel_Tier","Last Sold",
+     "Daily_Velocity","Weekly_Rate","Vel_Tier","Last Sold","Days Not Sold",
      "Total_Stock","Reorder_Velocity","Avg_Price","Est_Value"]
 show_cols = [c for c in show_cols if c in prod_sum.columns]
 
@@ -813,7 +827,7 @@ disp = prod_sum[show_cols].copy().rename(columns={
     "STR_Status":"Status","STR_Pct":"STR %","Total_Sold":"Units Sold",
     "Net_Sales":net_lbl,"Daily_Velocity":"Velocity (u/day)",
     "Weekly_Rate":"Rate/wk","Vel_Tier":"Trend",
-    "Last Sold":"Last Sold",
+    "Last Sold":"Last Sold","Days Not Sold":"Days Not Sold",
     "Total_Stock":"In Stock",
     "Reorder_Velocity":f"Order ({cover_days}d)",
     "Avg_Price":"Avg Price","Est_Value":"Est. Value"
@@ -837,14 +851,23 @@ def _style_last_sold(val):
     if "Never"   in val: return "color:#9ca3af"                   # grey — never sold
     return ""
 
+def _style_days_not_sold(val):
+    if not isinstance(val, (int, float)) or val == 9999: return "color:#9ca3af"
+    if val <= 7:   return "color:#16a34a;font-weight:600"   # green — this week
+    if val <= 30:  return "color:#16a34a"                   # green — this month
+    if val <= 90:  return "color:#d97706;font-weight:600"   # amber — 1-3 months
+    return "color:#dc2626;font-weight:600"                  # red — stale
+
 fmt_d = {"STR %":"{:.1f}%","Units Sold":"{:,.0f}","In Stock":"{:,.0f}",
          net_lbl:"{:,.0f}","Velocity (u/day)":"{:.3f}",
          "Rate/wk":"{:.2f}","Avg Price":"NPR {:,.0f}","Est. Value":"{:,.0f}",
-         f"Order ({cover_days}d)":"{:,.0f}"}
+         f"Order ({cover_days}d)":"{:,.0f}",
+         "Days Not Sold":"{:,.0f}"}
 _st = disp.style.map(_style_status, subset=["Status"])
-if f"Order ({cover_days}d)" in disp.columns: _st = _st.map(_style_order,     subset=[f"Order ({cover_days}d)"])
-if "Velocity (u/day)"       in disp.columns: _st = _st.map(_vel_style,       subset=["Velocity (u/day)"])
-if "Last Sold"              in disp.columns: _st = _st.map(_style_last_sold, subset=["Last Sold"])
+if f"Order ({cover_days}d)"  in disp.columns: _st = _st.map(_style_order,         subset=[f"Order ({cover_days}d)"])
+if "Velocity (u/day)"        in disp.columns: _st = _st.map(_vel_style,           subset=["Velocity (u/day)"])
+if "Last Sold"               in disp.columns: _st = _st.map(_style_last_sold,     subset=["Last Sold"])
+if "Days Not Sold"           in disp.columns: _st = _st.map(_style_days_not_sold, subset=["Days Not Sold"])
 st.dataframe(_st.format(fmt_d), width='stretch', hide_index=True)
 st.caption(f"{len(disp):,} products · 🔵 Order ({cover_days}d) = velocity × {cover_days}d − stock · velocity = {net_lbl} ÷ {velocity_days}d")
 
@@ -1028,24 +1051,33 @@ else:
                         f'</div></div>', unsafe_allow_html=True)
 
         with tab_catstore:
-            grp_key = ["Category","Sub Category","Store"] if "Sub Category" in ps.columns else ["Category","Store"]
-            cat_store = ps.groupby(grp_key).agg(Units_Sold=("Units Sold","sum")).reset_index()
-            stores_present = [s for s in active_stores if s in cat_store["Store"].unique()]
+            # Apply sub-category filter to store data (ps is only filtered by category)
+            ps_cat = ps.copy()
+            if sel_subs and "Sub Category" in ps_cat.columns:
+                ps_cat = ps_cat[ps_cat["Sub Category"].isin(sel_subs)]
+
+            grp_key = ["Category","Sub Category","Store"] if "Sub Category" in ps_cat.columns else ["Category","Store"]
+            cat_store = ps_cat.groupby(grp_key).agg(Units_Sold=("Units Sold","sum")).reset_index()
+            # Show all stores in units sold table but only active stores in order table
+            all_stores_present   = [s for s in LOCATION_ORDER if s in cat_store["Store"].unique()]
+            stores_present       = [s for s in active_stores   if s in cat_store["Store"].unique()]
             pivot_cols = ["Category","Sub Category"] if "Sub Category" in cat_store.columns else ["Category"]
 
-            # ── Units Sold pivot ────────────────────────────────────────────────
+            # ── Units Sold pivot — shows ALL stores including Lush ──────────────
             pivot = cat_store.pivot_table(
                 index=pivot_cols, columns="Store", values="Units_Sold",
                 aggfunc="sum", fill_value=0
             ).reset_index()
             pivot.columns.name = None
+            all_store_cols = [c for c in all_stores_present if c in pivot.columns]
             store_cols_present = [c for c in stores_present if c in pivot.columns]
-            pivot["Total"] = pivot[store_cols_present].sum(axis=1)
+            pivot["Total"] = pivot[all_store_cols].sum(axis=1)
             pivot = pivot.sort_values("Total", ascending=False)
 
             st.markdown("**Units Sold per Category per Store**")
             st.dataframe(
-                pivot.style.format({c: "{:,.0f}" for c in store_cols_present + ["Total"]}),
+                pivot[[c for c in pivot_cols + all_store_cols + ["Total"] if c in pivot.columns]]
+                .style.format({c: "{:,.0f}" for c in all_store_cols + ["Total"]}),
                 width='stretch', hide_index=True)
 
             # ── Reorder Qty pivot — distribute category Order(60d) by store share ──
@@ -1190,8 +1222,11 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
         # Category × Store — units sold pivot
         if "ps" in dir() and not ps.empty:
             try:
-                grp_key_dl = ["Category","Sub Category","Store"] if "Sub Category" in ps.columns else ["Category","Store"]
-                cat_store_dl = ps.groupby(grp_key_dl).agg(Units_Sold=("Units Sold","sum")).reset_index()
+                ps_dl = ps.copy()
+                if sel_subs and "Sub Category" in ps_dl.columns:
+                    ps_dl = ps_dl[ps_dl["Sub Category"].isin(sel_subs)]
+                grp_key_dl = ["Category","Sub Category","Store"] if "Sub Category" in ps_dl.columns else ["Category","Store"]
+                cat_store_dl = ps_dl.groupby(grp_key_dl).agg(Units_Sold=("Units Sold","sum")).reset_index()
                 stores_dl = [s for s in active_stores if s in cat_store_dl["Store"].unique()]
                 pivot_cols_dl = ["Category","Sub Category"] if "Sub Category" in cat_store_dl.columns else ["Category"]
                 pivot_dl = cat_store_dl.pivot_table(
