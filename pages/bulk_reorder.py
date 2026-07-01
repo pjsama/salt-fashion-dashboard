@@ -280,6 +280,21 @@ def load_product_store():
     for col in ["Product Name","Brand","Category","Store"]:
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
+    # Fix: strip size suffix from product names
+    if "Product Name" in df.columns:
+        SIZE_SUFFIXES_PS = {"XS","S","M","L","XL","2XL","3XL","4XL","5XL",
+                            "ONE SIZE","FREE SIZE","36","37","38","39","40","41","42","43","44"}
+        _dash_re_ps = re.compile(r'\s[-–]\s([A-Z0-9]{1,4})$')
+        def _fix_ps_name(n):
+            if "/" in n:
+                parts = n.rsplit("/", 1)
+                if parts[1].strip().upper() in SIZE_SUFFIXES_PS:
+                    return parts[0].strip()
+            m = _dash_re_ps.search(n)
+            if m and m.group(1).upper() in SIZE_SUFFIXES_PS:
+                return n[:m.start()].strip()
+            return n
+        df["Product Name"] = df["Product Name"].apply(_fix_ps_name)
     return df
 
 

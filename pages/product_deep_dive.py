@@ -262,6 +262,10 @@ def load_product_store():
     for col in ["Product Name","Brand","Category","Store"]:
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
+    # Fix: strip size suffix from product names (same as load_products)
+    if "Product Name" in df.columns:
+        df["Product Name"] = df["Product Name"].apply(
+            lambda n: _fix_name_size(n, "")[0])
     return df
 
 # ── Load ──────────────────────────────────────────────────────────────────────
