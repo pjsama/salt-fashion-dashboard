@@ -628,14 +628,6 @@ if has_last_sold:
     prod_sum["_days_not_sold"] = prod_sum["Days Not Sold"]
 
 else:
-    has_recent_90 = "Recent Sold 90d" in bdf.columns
-    if has_recent_90:
-        recent_90 = bdf.groupby(grp_cols).agg(Recent_90=("Recent Sold 90d","sum")).reset_index()
-        prod_sum  = prod_sum.merge(recent_90, on=grp_cols, how="left")
-        prod_sum["Recent_90"] = prod_sum["Recent_90"].fillna(0)
-    else:
-        prod_sum["Recent_90"] = 0
-
     def _last_sold_signal(r):
         if r["Total_Sold"] == 0: return "Never sold", 9999
         vs = r.get("_vel_sales", 0)
