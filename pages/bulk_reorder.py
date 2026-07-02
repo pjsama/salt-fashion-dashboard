@@ -265,6 +265,45 @@ def load_variants():
     return size_df, color_df
 
 @st.cache_resource(show_spinner=False)
+def load_product_store():
+    buf = _gdrive(GDRIVE_PRODSTORE_ID)
+    df = None
+    if buf:
+        try: df = pd.read_excel(buf, sheet_name="Product × Store", engine="openpyxl")
+        except: pass
+    if df is None:
+        base = r"C:\Users\Legion\Desktop\odoo_export\exports"
+        files = sorted(Path(base).glob("product_store_sales_*.xlsx"), reverse=True) if Path(base).exists() else []
+        if files:
+            try: df = pd.read_excel(files[0], sheet_name="Product × Store", engine="openpyxl")
+            except: pass
+    if df is None or df.empty: return None
+    df.columns = [str(c).strip() for c in df.columns]
+    for col in ["Units Sold","Revenue (NPR)"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    for col in ["Product Name","Brand","Category","Store"]:
+        if col in df.columns:
+            df[col] = df[col].fillna("").astype(str).str.strip()
+    # Fix: strip size suffix from product names
+    if "Product Name" in df.columns:
+        SIZE_SUFFIXES_PS = {"XS","S","M","L","XL","2XL","3XL","4XL","5XL",
+                            "ONE SIZE","FREE SIZE","36","37","38","39","40","41","42","43","44"}
+        _dash_re_ps = re.compile(r'\s[-–]\s([A-Z0-9]{1,4})$')
+        def _fix_ps_name(n):
+            if "/" in n:
+                parts = n.rsplit("/", 1)
+                if parts[1].strip().upper() in SIZE_SUFFIXES_PS:
+                    return parts[0].strip()
+            m = _dash_re_ps.search(n)
+            if m and m.group(1).upper() in SIZE_SUFFIXES_PS:
+                return n[:m.start()].strip()
+            return n
+        df["Product Name"] = df["Product Name"].apply(_fix_ps_name)
+    return df
+
+
+@st.cache_resource(show_spinner=False)
 def load_location_stock():
     """Load per-store stock from location_stock.xlsx — Store x Category sheet."""
     buf = _gdrive(GDRIVE_LOCSTK_ID)
