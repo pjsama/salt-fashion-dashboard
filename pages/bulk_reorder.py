@@ -26,6 +26,7 @@ st.markdown("""
 GDRIVE_MAIN_ID      = "1kIHUlGCallLjXe9tiBrYDQ16ElQDmLR3"
 GDRIVE_VARIANT_ID   = "1LPeoGXDDd3ZAppTiuLskzY4q-71CJWfJ"
 GDRIVE_PRODSTORE_ID = "10ZvRKu4icGDw_g95PplVVdKmj_m-Zpo4"
+GDRIVE_LOCSTK_ID    = "1zgTBhh7vOTjxEIz-LO3YSM-TXJeDUrBT"
 
 LOCATION_ORDER = ["Baneshwor","Lazimpat","Kumaripati","Chitwan","Pokhara","Online",
                   "Baneshwor Lush","Chitwan Lush","Pokhara Lush"]
@@ -264,7 +265,33 @@ def load_variants():
     return size_df, color_df
 
 @st.cache_resource(show_spinner=False)
-def load_product_store():
+def load_location_stock():
+    """Load per-store stock from location_stock.xlsx — Store x Category sheet."""
+    buf = _gdrive(GDRIVE_LOCSTK_ID)
+    df = None
+    if buf:
+        try: df = pd.read_excel(buf, sheet_name="Store x Category", engine="openpyxl")
+        except: pass
+    if df is None:
+        base = r"C:\Users\Legion\Desktop\odoo_export\exports"
+        files = sorted(Path(base).glob("location_stock_*.xlsx"), reverse=True) if Path(base).exists() else []
+        if files:
+            try: df = pd.read_excel(files[0], sheet_name="Store x Category", engine="openpyxl")
+            except: pass
+    if df is None or df.empty: return None
+    df.columns = [str(c).strip() for c in df.columns]
+    cat_col   = df.columns[0]
+    store_cols = [c for c in df.columns if c != cat_col]
+    rows = []
+    for _, row in df.iterrows():
+        cat = str(row[cat_col]).strip()
+        if not cat or cat.lower() in ("nan",""):
+            continue
+        for store in store_cols:
+            qty = row[store]
+            rows.append({"Category": cat, "Store": store.strip(),
+                         "Stock": max(0.0, float(qty) if not pd.isna(qty) else 0.0)})
+    return pd.DataFrame(rows) if rows else None
     buf = _gdrive(GDRIVE_PRODSTORE_ID)
     df = None
     if buf:
@@ -307,6 +334,7 @@ with st.spinner("Loading data…"):
     df_prod           = load_products()
     size_df, color_df = load_variants()
     df_prodstore      = load_product_store()
+    df_locstk         = load_location_stock()
 
 if df_prod is None:
     st.error("Could not load product data."); st.stop()
@@ -1062,6 +1090,22 @@ else:
         store_totals = store_totals.sort_values("_order").drop(columns=["_order"])
         store_totals = store_totals[store_totals["Units_Sold"] > 0]
 
+        # Add current stock per store from location_stock
+        if df_locstk is not None and sel_cats:
+            # Filter location stock to selected categories
+            _lsk = df_locstk[df_locstk["Category"].isin(sel_cats)] if sel_cats else df_locstk
+            _store_stock = _lsk.groupby("Store")["Stock"].sum().reset_index()
+            _store_stock.columns = ["Store","On Hand"]
+            store_totals = store_totals.merge(_store_stock, on="Store", how="left")
+            store_totals["On Hand"] = store_totals["On Hand"].fillna(0).astype(int)
+        elif df_locstk is not None and not sel_cats:
+            _store_stock = df_locstk.groupby("Store")["Stock"].sum().reset_index()
+            _store_stock.columns = ["Store","On Hand"]
+            store_totals = store_totals.merge(_store_stock, on="Store", how="left")
+            store_totals["On Hand"] = store_totals["On Hand"].fillna(0).astype(int)
+        else:
+            store_totals["On Hand"] = None
+
         # Share % and Order only from active (non-excluded) stores
         # Lush stores shown for visibility but don't receive reorder allocation
         active_mask   = store_totals["Store"].isin(active_stores)
@@ -1084,15 +1128,20 @@ else:
         with tab_store:
             col_tbl, col_bar = st.columns([2, 3])
             with col_tbl:
-                disp_st = store_totals[["Store","Units_Sold","Share_%","Order_Vel"]].rename(columns={
+                _st_disp_cols = ["Store","Units_Sold","On Hand","Share_%","Order_Vel"]
+                _st_disp_cols = [c for c in _st_disp_cols if c in store_totals.columns]
+                disp_st = store_totals[_st_disp_cols].rename(columns={
                     "Units_Sold":"Units Sold","Share_%":"Share %",
                     "Order_Vel":f"Order ({cover_days}d)"})
+                _fmt_st = {"Units Sold":"{:,.0f}","Share %":"{:.1f}%",
+                           f"Order ({cover_days}d)":"{:,.0f}"}
+                if "On Hand" in disp_st.columns:
+                    _fmt_st["On Hand"] = "{:,.0f}"
                 st.dataframe(
                     disp_st.style
                         .apply(_style_excluded_row, axis=1)
                         .map(_style_ord, subset=[f"Order ({cover_days}d)"])
-                        .format({"Units Sold":"{:,.0f}","Share %":"{:.1f}%",
-                                 f"Order ({cover_days}d)":"{:,.0f}"}),
+                        .format(_fmt_st),
                     width='stretch', hide_index=True)
                 active_order_total = store_totals.loc[active_mask, "Order_Vel"].sum()
                 excl_note = f" · *{', '.join(excluded_stores)} shown but excluded from order*" if excluded_stores else ""
@@ -1210,7 +1259,13 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
 
     if size_df is not None and "sz" in dir() and not sz.empty:
         sz_exp = sz[["Product Name","Size","Units Sold","In Stock","STR %","Status","Weekly Rate","Order (Vel)"]].copy()
-        sz_exp.to_excel(writer, sheet_name="By Size", index=False)
+        sz_exp.to_excel(writer, sheet_name="By Size (Product)", index=False)
+
+    # Size × Category breakdown
+    if size_df is not None and "sz_cat_agg" in dir() and not sz_cat_agg.empty:
+        sz_cat_exp = sz_cat_agg.rename(columns={"Units_Sold":"Units Sold","In_Stock":"In Stock"}) \
+            if "Units_Sold" in sz_cat_agg.columns else sz_cat_agg.copy()
+        sz_cat_exp.to_excel(writer, sheet_name="Size × Category", index=False)
 
     if color_df is not None and "cl" in dir() and not cl.empty:
         # Build color reorder sheet — matches product level data exactly
@@ -1330,4 +1385,4 @@ st.download_button(
     f"⬇️ Download Full Reorder Plan — {sel_brand} / {sel_cat if sel_cats else 'All'}",
     data=out, file_name=fname,
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-st.caption("Download includes: Category Summary · Product Plan (with Brand) · Size Breakdown · Color + Reorder · By Store · Category × Store (Sold) · Category × Store (Order)")
+st.caption("Download includes: Category Summary · Product Plan · Size × Category · By Size (Product) · Color + Reorder · By Store · Category × Store (Sold) · Category × Store (Order)")
