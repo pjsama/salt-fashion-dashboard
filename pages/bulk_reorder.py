@@ -1234,6 +1234,33 @@ else:
                 .style.format({c: "{:,.0f}" for c in all_store_cols + ["Total"]}),
                 width='stretch', hide_index=True)
 
+            # ── Total Stock pivot per Category per Store ─────────────────────
+            if df_locstk is not None:
+                _lsk_cat = df_locstk.copy()
+                if sel_cats:
+                    _lsk_cat = _lsk_cat[_lsk_cat["Category"].isin(sel_cats)]
+                if not _lsk_cat.empty:
+                    # Aggregate location stock by (Category × Store)
+                    stk_pivot_rows = []
+                    for cat_key in pivot[pivot_cols].itertuples(index=False):
+                        cat_val = cat_key[0] if len(pivot_cols) == 1 else cat_key
+                        _cat_mask = _lsk_cat["Category"] == (cat_val if len(pivot_cols) == 1 else cat_key[0])
+                        new_row = {c: getattr(cat_key, c) if hasattr(cat_key, c) else "" for c in pivot_cols}
+                        total_stk = 0
+                        for store in all_store_cols:
+                            stk = _lsk_cat.loc[_cat_mask & (_lsk_cat["Store"] == store), "Stock"].sum()
+                            new_row[store] = int(stk)
+                            total_stk += stk
+                        new_row["Total Stock"] = int(total_stk)
+                        stk_pivot_rows.append(new_row)
+                    stk_pivot = pd.DataFrame(stk_pivot_rows)
+                    if not stk_pivot.empty and stk_pivot["Total Stock"].sum() > 0:
+                        st.markdown("**Total Stock per Category per Store**")
+                        st.dataframe(
+                            stk_pivot[[c for c in pivot_cols + all_store_cols + ["Total Stock"] if c in stk_pivot.columns]]
+                            .style.format({c: "{:,.0f}" for c in all_store_cols + ["Total Stock"]}),
+                            width='stretch', hide_index=True)
+
             # ── Reorder Qty pivot — distribute category Order(60d) by store share ──
             st.markdown(f"**Order ({cover_days}d) per Category per Store**")
             st.caption("Each category's total reorder qty split by that store's share of sales")
@@ -1297,8 +1324,44 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
     full.to_excel(writer, sheet_name="Product Reorder Plan", index=False)
 
     if size_df is not None and "sz" in dir() and not sz.empty:
-        sz_exp = sz[["Product Name","Size","Units Sold","In Stock","STR %","Status","Weekly Rate","Order (Vel)"]].copy()
-        sz_exp.to_excel(writer, sheet_name="By Size (Product)", index=False)
+        # By Size — same detail level as By Color sheet
+        sz_exp = sz.copy()
+        # Add product-level columns (Trend, Launch Date, Last Sold, velocity)
+        prod_merge_cols = ["Product Name","Brand","Category"] + \
+            (["Sub Category"] if "Sub Category" in prod_sum.columns else []) + \
+            ["STR_Status","STR_Pct","Total_Sold","Net_Sales",
+             "Daily_Velocity","Weekly_Rate","Vel_Tier","Last Sold",
+             "Launch Date","Days Live","Total_Stock","Reorder_Velocity","Avg_Price"]
+        prod_merge_cols = [c for c in prod_merge_cols if c in prod_sum.columns]
+        sz_exp = sz_exp.merge(
+            prod_sum[prod_merge_cols],
+            on="Product Name", how="left", suffixes=("","_prod")
+        )
+        sz_exp = sz_exp.rename(columns={
+            "STR_Status":"Product Status","STR_Pct":"STR % (product)",
+            "Total_Sold":"Total Units Sold","Net_Sales":net_lbl,
+            "Daily_Velocity":"Velocity (u/day)","Weekly_Rate":"Product Rate/wk",
+            "Vel_Tier":"Trend","Total_Stock":"Total Stock",
+            "Reorder_Velocity":"Product Order","Avg_Price":"Avg Price",
+            "STR %":"STR % (size)","Units Sold":"Units Sold (size)",
+            "In Stock":"In Stock (size)",
+        })
+        export_sz_cols = [
+            "Product Name","Brand","Category","Sub Category",
+            "Size","Units Sold (size)","In Stock (size)",
+            "STR % (size)","Status","Size Share %",
+            "Total Units Sold","STR % (product)",net_lbl,
+            "Velocity (u/day)","Product Rate/wk","Trend",
+            "Launch Date","Days Live","Last Sold",
+            "Total Stock","Product Order","Order (Vel)","Avg Price"
+        ]
+        export_sz_cols = [c for c in export_sz_cols if c in sz_exp.columns]
+
+        # Add Size Share % if not already there
+        if "Size Share %" not in sz_exp.columns and "_size_share" in sz_exp.columns:
+            sz_exp["Size Share %"] = (sz_exp["_size_share"] * 100).round(1)
+
+        sz_exp[export_sz_cols].to_excel(writer, sheet_name="By Size (Product)", index=False)
 
     # Size × Category breakdown
     if size_df is not None and "sz_cat_agg" in dir() and not sz_cat_agg.empty:
