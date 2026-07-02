@@ -1235,30 +1235,29 @@ else:
                 width='stretch', hide_index=True)
 
             # ── Total Stock pivot per Category per Store ─────────────────────
+            # Note: location_stock is at parent Category level (no Sub Category)
+            # so we show one row per Category (not sub-category)
+            stk_pivot = None
             if df_locstk is not None:
                 _lsk_cat = df_locstk.copy()
                 if sel_cats:
                     _lsk_cat = _lsk_cat[_lsk_cat["Category"].isin(sel_cats)]
                 if not _lsk_cat.empty:
-                    # Aggregate location stock by (Category × Store)
-                    stk_pivot_rows = []
-                    for cat_key in pivot[pivot_cols].itertuples(index=False):
-                        cat_val = cat_key[0] if len(pivot_cols) == 1 else cat_key
-                        _cat_mask = _lsk_cat["Category"] == (cat_val if len(pivot_cols) == 1 else cat_key[0])
-                        new_row = {c: getattr(cat_key, c) if hasattr(cat_key, c) else "" for c in pivot_cols}
-                        total_stk = 0
-                        for store in all_store_cols:
-                            stk = _lsk_cat.loc[_cat_mask & (_lsk_cat["Store"] == store), "Stock"].sum()
-                            new_row[store] = int(stk)
-                            total_stk += stk
-                        new_row["Total Stock"] = int(total_stk)
-                        stk_pivot_rows.append(new_row)
-                    stk_pivot = pd.DataFrame(stk_pivot_rows)
-                    if not stk_pivot.empty and stk_pivot["Total Stock"].sum() > 0:
+                    stk_pivot = _lsk_cat.pivot_table(
+                        index="Category", columns="Store", values="Stock",
+                        aggfunc="sum", fill_value=0
+                    ).reset_index()
+                    stk_pivot.columns.name = None
+                    _stk_store_cols = [c for c in all_store_cols if c in stk_pivot.columns]
+                    stk_pivot["Total Stock"] = stk_pivot[_stk_store_cols].sum(axis=1)
+                    stk_pivot = stk_pivot.sort_values("Total Stock", ascending=False)
+                    if stk_pivot["Total Stock"].sum() > 0:
                         st.markdown("**Total Stock per Category per Store**")
+                        st.caption("Stock from location_stock.xlsx — parent category level only")
                         st.dataframe(
-                            stk_pivot[[c for c in pivot_cols + all_store_cols + ["Total Stock"] if c in stk_pivot.columns]]
-                            .style.format({c: "{:,.0f}" for c in all_store_cols + ["Total Stock"]}),
+                            stk_pivot[[c for c in ["Category"] + _stk_store_cols + ["Total Stock"]
+                                       if c in stk_pivot.columns]]
+                            .style.format({c: "{:,.0f}" for c in _stk_store_cols + ["Total Stock"]}),
                             width='stretch', hide_index=True)
 
             # ── Reorder Qty pivot — distribute category Order(60d) by store share ──
@@ -1478,6 +1477,23 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                 pd.DataFrame(reorder_rows_dl).sort_values(
                     "Total Order", ascending=False
                 ).to_excel(writer, sheet_name="Category × Store (Order)", index=False)
+
+                # Category × Store Stock
+                if df_locstk is not None:
+                    _lsk_dl = df_locstk.copy()
+                    if sel_cats:
+                        _lsk_dl = _lsk_dl[_lsk_dl["Category"].isin(sel_cats)]
+                    if not _lsk_dl.empty:
+                        stk_dl = _lsk_dl.pivot_table(
+                            index="Category", columns="Store", values="Stock",
+                            aggfunc="sum", fill_value=0
+                        ).reset_index()
+                        stk_dl.columns.name = None
+                        _stk_cols_dl = [c for c in stores_dl if c in stk_dl.columns]
+                        stk_dl["Total Stock"] = stk_dl[[c for c in stk_dl.columns
+                                                          if c != "Category"]].sum(axis=1)
+                        stk_dl.sort_values("Total Stock", ascending=False)\
+                              .to_excel(writer, sheet_name="Category × Store (Stock)", index=False)
             except Exception as e:
                 pass  # Skip if pivot fails
 
@@ -1487,4 +1503,4 @@ st.download_button(
     f"⬇️ Download Full Reorder Plan — {sel_brand} / {sel_cat if sel_cats else 'All'}",
     data=out, file_name=fname,
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-st.caption("Download includes: Category Summary · Product Plan · Size × Category · By Size (Product) · Color + Reorder · By Store · Category × Store (Sold) · Category × Store (Order)")
+st.caption("Download includes: Category Summary · Product Plan · Size × Category · By Size (Product) · Color + Reorder · By Store · Category × Store (Sold) · Category × Store (Order) · Category × Store (Stock)")
