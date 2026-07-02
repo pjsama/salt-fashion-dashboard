@@ -1518,7 +1518,7 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                                      "Order_Vel":f"Order ({cover_days}d)"})\
             .to_excel(writer, sheet_name="By Store", index=False)
 
-        # Category × Store — units sold pivot
+        # ── Category × Store — combined Sold / Order / Stock in ONE sheet ────
         if "ps" in dir() and not ps.empty:
             try:
                 ps_dl = ps.copy()
@@ -1536,10 +1536,9 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                 store_cols_dl = [c for c in stores_dl if c in pivot_dl.columns]
                 pivot_dl["Total"] = pivot_dl[store_cols_dl].sum(axis=1)
                 pivot_dl = pivot_dl.sort_values("Total", ascending=False)
-                pivot_dl.to_excel(writer, sheet_name="Category × Store (Sold)", index=False)
 
-                # Category × Store — reorder pivot
-                reorder_rows_dl = []
+                # ── Order rows ─────────────────────────────────────────────
+                order_rows_dl = []
                 for _, row in pivot_dl.iterrows():
                     key = tuple(row[c] for c in pivot_cols_dl)
                     total_reorder = cat_reorder_map.get(key, 0)
@@ -1554,13 +1553,12 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                     else:
                         for store in store_cols_dl:
                             new_row[store] = 0
-                    new_row["Total Order"] = round(total_reorder)
-                    reorder_rows_dl.append(new_row)
-                pd.DataFrame(reorder_rows_dl).sort_values(
-                    "Total Order", ascending=False
-                ).to_excel(writer, sheet_name="Category × Store (Order)", index=False)
+                    new_row["Total"] = round(total_reorder)
+                    order_rows_dl.append(new_row)
+                order_df_dl = pd.DataFrame(order_rows_dl)
 
-                # Category × Store Stock — split by Sub Category (estimate) when available
+                # ── Stock rows (Sub Category split is an estimate) ──────────
+                stock_df_dl = None
                 if df_locstk is not None:
                     _lsk_dl = df_locstk.copy()
                     if sel_cats:
@@ -1572,7 +1570,7 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                         ).reset_index()
                         stk_dl.columns.name = None
                         _stk_cols_dl = [c for c in stores_dl if c in stk_dl.columns]
-                        stk_dl["Total Stock"] = stk_dl[_stk_cols_dl].sum(axis=1)
+                        stk_dl["Total"] = stk_dl[_stk_cols_dl].sum(axis=1)
 
                         has_subcat_dl = "Sub Category" in pivot_dl.columns and \
                             pivot_dl["Sub Category"].astype(str).str.strip().ne("").any()
@@ -1593,14 +1591,44 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                                 else:
                                     for store in _stk_cols_dl:
                                         new_row[store] = 0
-                                new_row["Total Stock"] = sum(new_row[s] for s in _stk_cols_dl)
+                                new_row["Total"] = sum(new_row[s] for s in _stk_cols_dl)
                                 stk_sub_rows_dl.append(new_row)
-                            pd.DataFrame(stk_sub_rows_dl).sort_values(
-                                "Total Stock", ascending=False
-                            ).to_excel(writer, sheet_name="Category × Store (Stock)", index=False)
+                            stock_df_dl = pd.DataFrame(stk_sub_rows_dl)
                         else:
-                            stk_dl.sort_values("Total Stock", ascending=False)\
-                                  .to_excel(writer, sheet_name="Category × Store (Stock)", index=False)
+                            stock_df_dl = stk_dl
+
+                # ── Stack Sold / Order / Stock into one long table ──────────
+                all_store_cols_combined = store_cols_dl.copy()
+                if stock_df_dl is not None:
+                    for c in stock_df_dl.columns:
+                        if c not in pivot_cols_dl + ["Total"] and c not in all_store_cols_combined:
+                            all_store_cols_combined.append(c)
+
+                combined_cols = pivot_cols_dl + ["Metric"] + all_store_cols_combined + ["Total"]
+
+                def _to_combined(df_src, metric_label):
+                    if df_src is None or df_src.empty:
+                        return pd.DataFrame(columns=combined_cols)
+                    out_df = df_src.copy()
+                    out_df["Metric"] = metric_label
+                    for c in all_store_cols_combined:
+                        if c not in out_df.columns:
+                            out_df[c] = 0
+                    if "Sub Category" not in out_df.columns and "Sub Category" in pivot_cols_dl:
+                        out_df["Sub Category"] = ""
+                    return out_df[combined_cols]
+
+                combined = pd.concat([
+                    _to_combined(pivot_dl,  "Units Sold"),
+                    _to_combined(order_df_dl, f"Order ({cover_days}d)"),
+                    _to_combined(stock_df_dl, "In Stock"),
+                ], ignore_index=True)
+
+                sort_cols = [c for c in pivot_cols_dl if c in combined.columns]
+                metric_rank = {"Units Sold": 0, f"Order ({cover_days}d)": 1, "In Stock": 2}
+                combined["_mrank"] = combined["Metric"].map(metric_rank).fillna(9)
+                combined = combined.sort_values(sort_cols + ["_mrank"]).drop(columns=["_mrank"])
+                combined.to_excel(writer, sheet_name="Category × Store", index=False)
             except Exception as e:
                 pass  # Skip if pivot fails
 
@@ -1610,4 +1638,4 @@ st.download_button(
     f"⬇️ Download Full Reorder Plan — {sel_brand} / {sel_cat if sel_cats else 'All'}",
     data=out, file_name=fname,
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-st.caption("Download includes: Category Summary · Product Plan · Size × Category · By Size (Product) · Color + Reorder · By Store · Category × Store (Sold) · Category × Store (Order) · Category × Store (Stock)")
+st.caption("Download includes: Category Summary · Product Plan · Size × Category · By Size (Product) · Color + Reorder · By Store · Category × Store (Sold/Order/Stock in one sheet)")
