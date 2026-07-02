@@ -76,17 +76,23 @@ def _gdrive(file_id):
         buf.seek(0); return buf
     except: return None
 
-def _fix_name_size(name, size):
-    """Strip size/dash suffix from product name, return (clean_name, size)."""
+def _fix_name_size(name, size, color=""):
+    """Strip size/dash suffix, or color suffix, from product name.
+    Returns (clean_name, size, color). Matches the base-name logic already
+    used in variant_analysis.xlsx and product_store_sales.xlsx — otherwise
+    the same product ends up under two different names and Size/Color/Store
+    breakdowns silently show nothing for it."""
     if "/" in name:
         parts = name.rsplit("/", 1)
         suffix = parts[1].strip()
         if suffix.upper() in SIZE_SUFFIXES:
-            return parts[0].strip(), size if size else suffix
+            return parts[0].strip(), (size if size else suffix), color
+        elif suffix and not color:
+            return parts[0].strip(), size, suffix
     m = _dash_re.search(name)
     if m and m.group(1).upper() in SIZE_SUFFIXES:
-        return name[:m.start()].strip(), size if size else m.group(1)
-    return name, size
+        return name[:m.start()].strip(), (size if size else m.group(1)), color
+    return name, size, color
 
 @st.cache_resource(show_spinner=False)
 def load_products():
@@ -114,11 +120,15 @@ def load_products():
     for col in ["Brand","Category","Sub Category","Product Name","Color","Size"]:
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
-    # Fix size in name
+    # Fix size/color in name
     if "Product Name" in df.columns and "Size" in df.columns:
-        fixed = df.apply(lambda r: _fix_name_size(r["Product Name"], r["Size"]), axis=1, result_type="expand")
+        if "Color" not in df.columns:
+            df["Color"] = ""
+        fixed = df.apply(lambda r: _fix_name_size(r["Product Name"], r["Size"], r["Color"]),
+                          axis=1, result_type="expand")
         df["Product Name"] = fixed[0]
         df["Size"]         = fixed[1]
+        df["Color"]        = fixed[2]
     if "Create Date" in df.columns:
         df["Create Date"] = pd.to_datetime(df["Create Date"], errors="coerce")
     SKIP = {"All","Saleable","PoS",""}

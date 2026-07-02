@@ -107,31 +107,46 @@ def load_products():
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
 
-    # Fix: some products have size embedded in name ("Dress/S", "Top/XL")
-    # but Size column is empty — strip it out and populate Size
+    # Fix: some products have size OR color embedded in name
+    # ("Dress/S", "Top - M", "Belted Wide-Leg Formal Pant/Cream") but the
+    # Size/Color columns are empty. Strip the suffix and populate the right
+    # column. This must match the logic already used in variant_analysis.xlsx
+    # (load_variants' parse_name_color) and product_store_sales.xlsx —
+    # otherwise the same product ends up under two different base names
+    # across the three data sources and Size/Color/Store breakdowns silently
+    # show nothing for it.
     SIZE_SUFFIXES = {"XS","S","M","L","XL","2XL","3XL","4XL","5XL",
                      "ONE SIZE","FREE SIZE","36","37","38","39","40","41","42","43","44"}
     _dash_re = re.compile(r'\s[-–]\s([A-Z0-9]{1,4})$')
 
+    if "Color" not in df.columns:
+        df["Color"] = ""
+
     def _fix_name_size(row):
-        name = row["Product Name"]
-        size = row["Size"]
-        # Pattern 1: "Product/S"
+        name  = row["Product Name"]
+        size  = row["Size"]
+        color = row["Color"]
+        # Pattern 1: "Product/S" (size) or "Product/Cream" (color)
         if "/" in name:
-            parts = name.rsplit("/", 1)
+            parts  = name.rsplit("/", 1)
             suffix = parts[1].strip()
             if suffix.upper() in SIZE_SUFFIXES:
-                return parts[0].strip(), size if size else suffix
-        # Pattern 2: "Product - M"
+                return parts[0].strip(), (size if size else suffix), color
+            elif suffix and not color:
+                # Not a recognized size → treat as color, same as
+                # parse_name_color() in load_variants()
+                return parts[0].strip(), size, suffix
+        # Pattern 2: "Product - M" (dash pattern — size only)
         m = _dash_re.search(name)
         if m and m.group(1).upper() in SIZE_SUFFIXES:
-            return name[:m.start()].strip(), size if size else m.group(1)
-        return name, size
+            return name[:m.start()].strip(), (size if size else m.group(1)), color
+        return name, size, color
 
     if "Product Name" in df.columns and "Size" in df.columns:
         fixed = df.apply(_fix_name_size, axis=1, result_type="expand")
         df["Product Name"] = fixed[0]
         df["Size"]         = fixed[1]
+        df["Color"]        = fixed[2]
     if "Create Date" in df.columns:
         df["Create Date"] = pd.to_datetime(df["Create Date"], errors="coerce")
     SKIP = {"All","Saleable","PoS",""}
@@ -285,15 +300,18 @@ def load_product_store():
     for col in ["Product Name","Brand","Category","Store"]:
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
-    # Fix: strip size suffix from product names
+    # Fix: strip size OR color suffix from product names so this matches the
+    # base names already used in load_products()/load_variants(). Store-level
+    # sales don't need to preserve color, so any non-size suffix is stripped.
     if "Product Name" in df.columns:
         SIZE_SUFFIXES_PS = {"XS","S","M","L","XL","2XL","3XL","4XL","5XL",
                             "ONE SIZE","FREE SIZE","36","37","38","39","40","41","42","43","44"}
         _dash_re_ps = re.compile(r'\s[-–]\s([A-Z0-9]{1,4})$')
         def _fix_ps_name(n):
             if "/" in n:
-                parts = n.rsplit("/", 1)
-                if parts[1].strip().upper() in SIZE_SUFFIXES_PS:
+                parts  = n.rsplit("/", 1)
+                suffix = parts[1].strip()
+                if suffix.upper() in SIZE_SUFFIXES_PS or suffix:
                     return parts[0].strip()
             m = _dash_re_ps.search(n)
             if m and m.group(1).upper() in SIZE_SUFFIXES_PS:
@@ -331,41 +349,6 @@ def load_location_stock():
             rows.append({"Category": cat, "Store": store.strip(),
                          "Stock": max(0.0, float(qty) if not pd.isna(qty) else 0.0)})
     return pd.DataFrame(rows) if rows else None
-    buf = _gdrive(GDRIVE_PRODSTORE_ID)
-    df = None
-    if buf:
-        try: df = pd.read_excel(buf, sheet_name="Product × Store", engine="openpyxl")
-        except: pass
-    if df is None:
-        base = r"C:\Users\Legion\Desktop\odoo_export\exports"
-        files = sorted(Path(base).glob("product_store_sales_*.xlsx"), reverse=True) if Path(base).exists() else []
-        if files:
-            try: df = pd.read_excel(files[0], sheet_name="Product × Store", engine="openpyxl")
-            except: pass
-    if df is None or df.empty: return None
-    df.columns = [str(c).strip() for c in df.columns]
-    for col in ["Units Sold","Revenue (NPR)"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-    for col in ["Product Name","Brand","Category","Store"]:
-        if col in df.columns:
-            df[col] = df[col].fillna("").astype(str).str.strip()
-    # Fix: strip size suffix from product names
-    if "Product Name" in df.columns:
-        SIZE_SUFFIXES_PS = {"XS","S","M","L","XL","2XL","3XL","4XL","5XL",
-                            "ONE SIZE","FREE SIZE","36","37","38","39","40","41","42","43","44"}
-        _dash_re_ps = re.compile(r'\s[-–]\s([A-Z0-9]{1,4})$')
-        def _fix_ps_name(n):
-            if "/" in n:
-                parts = n.rsplit("/", 1)
-                if parts[1].strip().upper() in SIZE_SUFFIXES_PS:
-                    return parts[0].strip()
-            m = _dash_re_ps.search(n)
-            if m and m.group(1).upper() in SIZE_SUFFIXES_PS:
-                return n[:m.start()].strip()
-            return n
-        df["Product Name"] = df["Product Name"].apply(_fix_ps_name)
-    return df
 
 
 # ── Load ──────────────────────────────────────────────────────────────────────
