@@ -63,6 +63,23 @@ def str_status(p):
     if p > 0:   return "Slow"
     return "Dead"
 
+def _largest_remainder_split(total, shares):
+    """Split an integer `total` across `shares` (dict of key->fraction summing
+    to ~1) so the resulting integers sum EXACTLY to round(total), instead of
+    each share being rounded independently (which can over/under-count by a
+    few units due to accumulated rounding error)."""
+    total = round(total)
+    if total <= 0 or not shares:
+        return {k: 0 for k in shares}
+    raw = {k: total * s for k, s in shares.items()}
+    floors = {k: int(v) for k, v in raw.items()}
+    remainder = total - sum(floors.values())
+    # Give the leftover units to the keys with the largest fractional part
+    order = sorted(raw.keys(), key=lambda k: raw[k] - floors[k], reverse=True)
+    for k in order[:remainder]:
+        floors[k] += 1
+    return floors
+
 def _gdrive(file_id):
     try:
         from google.oauth2.service_account import Credentials
@@ -321,6 +338,24 @@ def load_product_store():
     return df
 
 
+# Store names need normalizing: fetch_location_stock.py writes store names
+# from Odoo's raw location path (e.g. "WA/stock/LAZIMPAT" → "LAZIMPAT"),
+# which don't match the title-case names used everywhere else (LOCATION_ORDER,
+# POS sales data). Without this, stores like Lazimpat silently disappear from
+# any pivot/join keyed on store name (they're "LAZIMPAT" here vs "Lazimpat"
+# elsewhere).
+STORE_NAME_FIX = {
+    "lazimpat":       "Lazimpat",
+    "baneshwor":      "Baneshwor",
+    "chitwan":        "Chitwan",
+    "kumaripati":     "Kumaripati",
+    "pokhara":        "Pokhara",
+    "online":         "Online",
+    "main warehouse": "Main Warehouse",
+}
+def _norm_store(name):
+    return STORE_NAME_FIX.get(str(name).strip().lower(), str(name).strip())
+
 @st.cache_resource(show_spinner=False)
 def load_location_stock():
     """Load per-store stock from location_stock.xlsx — Store x Category sheet."""
@@ -346,9 +381,15 @@ def load_location_stock():
             continue
         for store in store_cols:
             qty = row[store]
-            rows.append({"Category": cat, "Store": store.strip(),
+            rows.append({"Category": cat, "Store": _norm_store(store),
                          "Stock": max(0.0, float(qty) if not pd.isna(qty) else 0.0)})
-    return pd.DataFrame(rows) if rows else None
+    if not rows:
+        return None
+    out = pd.DataFrame(rows)
+    # A store may map to the same normalized name from multiple raw columns
+    # (shouldn't normally happen, but be safe) — sum instead of overwrite
+    out = out.groupby(["Category","Store"], as_index=False)["Stock"].sum()
+    return out
 
 
 # ── Load ──────────────────────────────────────────────────────────────────────
@@ -411,7 +452,6 @@ with st.sidebar:
     st.markdown("**Reorder Settings**")
     min_str_pct = st.slider("Min STR % to include", 0, 100, 50,
         help="Only show products at or above this sell-through rate")
-    target_weeks = st.slider("Target weeks of cover", 2, 12, 4)
     show_zero = st.checkbox("Show products with no sales", value=False,
         help="When unchecked, hides products with zero all-time sales. Products with stock but low recent velocity are always shown.")
 
@@ -1261,10 +1301,15 @@ else:
                 if not isinstance(total_reorder,(int,float)): total_reorder = 0
                 row_total_sold = row["Total"]
                 new_row = {c: row[c] for c in pivot_cols}
-                for store in store_cols_present:
-                    share = row[store] / row_total_sold if row_total_sold > 0 else 0
-                    new_row[store] = round(total_reorder * share)
-                new_row["Total Order"] = total_reorder
+                if row_total_sold > 0 and total_reorder > 0:
+                    shares = {store: row[store] / row_total_sold for store in store_cols_present}
+                    split  = _largest_remainder_split(total_reorder, shares)
+                    for store in store_cols_present:
+                        new_row[store] = split[store]
+                else:
+                    for store in store_cols_present:
+                        new_row[store] = 0
+                new_row["Total Order"] = round(total_reorder)
                 reorder_rows.append(new_row)
 
             reorder_pivot = pd.DataFrame(reorder_rows)
@@ -1452,10 +1497,15 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                     if not isinstance(total_reorder,(int,float)): total_reorder = 0
                     row_total = row["Total"]
                     new_row = {c: row[c] for c in pivot_cols_dl}
-                    for store in store_cols_dl:
-                        share = row[store] / row_total if row_total > 0 else 0
-                        new_row[store] = round(total_reorder * share)
-                    new_row["Total Order"] = total_reorder
+                    if row_total > 0 and total_reorder > 0:
+                        shares_dl = {store: row[store] / row_total for store in store_cols_dl}
+                        split_dl  = _largest_remainder_split(total_reorder, shares_dl)
+                        for store in store_cols_dl:
+                            new_row[store] = split_dl[store]
+                    else:
+                        for store in store_cols_dl:
+                            new_row[store] = 0
+                    new_row["Total Order"] = round(total_reorder)
                     reorder_rows_dl.append(new_row)
                 pd.DataFrame(reorder_rows_dl).sort_values(
                     "Total Order", ascending=False
