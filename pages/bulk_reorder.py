@@ -159,7 +159,7 @@ def load_products():
             return name[:m.start()].strip(), (size if size else m.group(1)), color
         return name, size, color
 
-    if "Product Name" in df.columns and "Size" in df.columns:
+    if "Product Name" in df.columns and "Size" in df.columns and not df.empty:
         fixed = df.apply(_fix_name_size, axis=1, result_type="expand")
         df["Product Name"] = fixed[0]
         df["Size"]         = fixed[1]
@@ -227,7 +227,7 @@ def load_variants():
                 return name[:m.start()].strip(), size if size else m.group(1)
             return name, size
 
-        if "Size" in df.columns:
+        if "Size" in df.columns and not df.empty:
             fixed = df.apply(_fix_variant_name, axis=1, result_type="expand")
             df["Product Name"] = fixed[0]
             df["Size"]         = fixed[1]
@@ -733,10 +733,19 @@ else:
         if vs > 0:    return f"< {_vel_window}d", 30
         else:         return f"> {_vel_window}d", _vel_window + 30
 
-    signals = prod_sum.apply(_last_sold_signal, axis=1, result_type="expand")
-    prod_sum["Last Sold"]      = signals[0]
-    prod_sum["Days Not Sold"]  = signals[1]
-    prod_sum["_days_not_sold"] = signals[1]
+    if prod_sum.empty:
+        # apply(..., result_type="expand") can't infer column shape from
+        # zero rows — happens whenever the current Brand/Category/Sub
+        # Category/Search filters match no products at all (e.g. a
+        # non-clothing brand like AXIS-Y with the default filters)
+        prod_sum["Last Sold"]      = pd.Series(dtype="object")
+        prod_sum["Days Not Sold"]  = pd.Series(dtype="int64")
+        prod_sum["_days_not_sold"] = pd.Series(dtype="int64")
+    else:
+        signals = prod_sum.apply(_last_sold_signal, axis=1, result_type="expand")
+        prod_sum["Last Sold"]      = signals[0]
+        prod_sum["Days Not Sold"]  = signals[1]
+        prod_sum["_days_not_sold"] = signals[1]
 
 # ── Launch Date and Days Live (from Launch) ───────────────────────────────────
 has_launch = "Launch Date" in bdf.columns
