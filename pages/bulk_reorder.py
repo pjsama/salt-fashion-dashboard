@@ -805,6 +805,60 @@ for col, val, lbl, clr in [
 
 st.markdown("<br>", unsafe_allow_html=True)
 
+def _cat_style(val):
+    if isinstance(val,(int,float)) and val > 0:
+        return "background-color:#dbeafe;color:#1e40af;font-weight:700"
+    return ""
+
+def _vel_style(val):
+    if isinstance(val,(int,float)) and val > 0:
+        return "color:#0f766e;font-weight:600"
+    return ""
+
+# ── Parent Category Summary (no Sub Category breakdown) ───────────────────────
+st.markdown('<div class="sec">📊 Parent Category Summary</div>', unsafe_allow_html=True)
+
+parent_cat_sum = prod_sum.groupby(["Category"]).agg(
+    Products      = ("Product Name",    "count"),
+    Units_Sold    = ("Total_Sold",      "sum"),
+    Net_Sales     = ("Net_Sales",       "sum"),
+    In_Stock      = ("Total_Stock",     "sum"),
+    Avg_STR       = ("STR_Pct",         "mean"),
+    Order_Vel     = ("Reorder_Velocity","sum"),
+    Est_Value     = ("Est_Value",       "sum"),
+).reset_index().sort_values("Order_Vel", ascending=False)
+
+# Velocity at category level = total net sales / lookback days (not sum of individual velocities)
+parent_cat_sum["Velocity_Day"] = (parent_cat_sum["Net_Sales"] / velocity_days).round(2)
+parent_cat_sum["Weekly_Rate"]  = (parent_cat_sum["Velocity_Day"] * 7).round(1)
+parent_cat_sum["Avg_STR"]      = parent_cat_sum["Avg_STR"].round(1)
+parent_cat_sum["Est_Value"]    = parent_cat_sum["Est_Value"].apply(fmt_npr)
+parent_cat_sum = parent_cat_sum.rename(columns={
+    "Products":"# Products","Units_Sold":"Units Sold",
+    "Net_Sales":net_lbl,
+    "In_Stock":"In Stock","Avg_STR":"Avg STR %",
+    "Velocity_Day":"Velocity (u/day)","Weekly_Rate":"Rate/wk",
+    "Order_Vel":f"Order ({cover_days}d)","Est_Value":"Est. Value"
+})
+
+disp_parent_cat_cols = ["Category","# Products","Units Sold", net_lbl, "In Stock","Avg STR %",
+     "Velocity (u/day)","Rate/wk", f"Order ({cover_days}d)","Est. Value"]
+disp_parent_cat_cols = [c for c in disp_parent_cat_cols if c in parent_cat_sum.columns]
+
+st.dataframe(
+    parent_cat_sum[disp_parent_cat_cols].style
+        .map(_cat_style, subset=[f"Order ({cover_days}d)"])
+        .map(_vel_style,  subset=["Velocity (u/day)"])
+        .format({"Avg STR %":"{:.1f}%","Units Sold":"{:,.0f}","In Stock":"{:,.0f}",
+                 net_lbl:"{:,.0f}","Velocity (u/day)":"{:.2f}","Rate/wk":"{:.1f}",
+                 f"Order ({cover_days}d)":"{:,.0f}"}),
+    width='stretch', hide_index=True)
+st.caption(
+    f"Parent category only (Sub Category rolled up) · **{net_lbl}** = units sold in the lookback window · "
+    f"**Velocity (u/day)** = {net_lbl} ÷ {velocity_days}d · "
+    f"**Order ({cover_days}d)** = velocity × {cover_days}d − stock"
+)
+
 # ── Category Summary ──────────────────────────────────────────────────────────
 st.markdown('<div class="sec">📊 Category Summary</div>', unsafe_allow_html=True)
 
@@ -833,16 +887,6 @@ cat_sum = cat_sum.rename(columns={
     "Velocity_Day":"Velocity (u/day)","Weekly_Rate":"Rate/wk",
     "Order_Vel":f"Order ({cover_days}d)","Est_Value":"Est. Value"
 })
-
-def _cat_style(val):
-    if isinstance(val,(int,float)) and val > 0:
-        return "background-color:#dbeafe;color:#1e40af;font-weight:700"
-    return ""
-
-def _vel_style(val):
-    if isinstance(val,(int,float)) and val > 0:
-        return "color:#0f766e;font-weight:600"
-    return ""
 
 disp_cat_cols = ["Category"] + \
     (["Sub Category"] if has_sub else []) + \
