@@ -1435,6 +1435,7 @@ else:
 st.markdown("---")
 out = BytesIO()
 with pd.ExcelWriter(out, engine="openpyxl") as writer:
+    parent_cat_sum.to_excel(writer, sheet_name="Parent Category Summary", index=False)
     cat_sum.to_excel(writer, sheet_name="Category Summary", index=False)
 
     full = prod_sum[["Product Name","Brand","Category"] +
@@ -1691,4 +1692,4 @@ st.download_button(
     f"⬇️ Download Full Reorder Plan — {sel_brand} / {sel_cat if sel_cats else 'All'}",
     data=out, file_name=fname,
     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-st.caption("Download includes: Category Summary · Product Plan · Size × Category · By Size (Product) · Color + Reorder · By Store · Category × Store (Sold/Order/Stock in one sheet)")
+st.caption("Download includes: Parent Category Summary · Category Summary · Product Plan · Size × Category · By Size (Product) · Color + Reorder · By Store · Category × Store (Sold/Order/Stock in one sheet)")
