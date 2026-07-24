@@ -31,8 +31,6 @@ GDRIVE_LOCSTK_ID    = "1zgTBhh7vOTjxEIz-LO3YSM-TXJeDUrBT"
 LOCATION_ORDER = ["Baneshwor","Lazimpat","Kumaripati","Chitwan","Pokhara","Online",
                   "Baneshwor Lush","Chitwan Lush","Pokhara Lush"]
 
-# Stores excluded from clothing/accessories reorder by default
-# (cosmetics-only locations that skew the data)
 DEFAULT_EXCLUDED_STORES = {"Baneshwor Lush","Chitwan Lush","Pokhara Lush"}
 
 SIZE_ORDER = ["XS","S","M","L","XL","2XL","3XL","4XL","5XL","ONE SIZE","FREE SIZE",
@@ -64,17 +62,12 @@ def str_status(p):
     return "Dead"
 
 def _largest_remainder_split(total, shares):
-    """Split an integer `total` across `shares` (dict of key->fraction summing
-    to ~1) so the resulting integers sum EXACTLY to round(total), instead of
-    each share being rounded independently (which can over/under-count by a
-    few units due to accumulated rounding error)."""
     total = round(total)
     if total <= 0 or not shares:
         return {k: 0 for k in shares}
     raw = {k: total * s for k, s in shares.items()}
     floors = {k: int(v) for k, v in raw.items()}
     remainder = total - sum(floors.values())
-    # Give the leftover units to the keys with the largest fractional part
     order = sorted(raw.keys(), key=lambda k: raw[k] - floors[k], reverse=True)
     for k in order[:remainder]:
         floors[k] += 1
@@ -124,14 +117,6 @@ def load_products():
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
 
-    # Fix: some products have size OR color embedded in name
-    # ("Dress/S", "Top - M", "Belted Wide-Leg Formal Pant/Cream") but the
-    # Size/Color columns are empty. Strip the suffix and populate the right
-    # column. This must match the logic already used in variant_analysis.xlsx
-    # (load_variants' parse_name_color) and product_store_sales.xlsx —
-    # otherwise the same product ends up under two different base names
-    # across the three data sources and Size/Color/Store breakdowns silently
-    # show nothing for it.
     SIZE_SUFFIXES = {"XS","S","M","L","XL","2XL","3XL","4XL","5XL",
                      "ONE SIZE","FREE SIZE","36","37","38","39","40","41","42","43","44"}
     _dash_re = re.compile(r'\s[-–]\s([A-Z0-9]{1,4})$')
@@ -143,17 +128,13 @@ def load_products():
         name  = row["Product Name"]
         size  = row["Size"]
         color = row["Color"]
-        # Pattern 1: "Product/S" (size) or "Product/Cream" (color)
         if "/" in name:
             parts  = name.rsplit("/", 1)
             suffix = parts[1].strip()
             if suffix.upper() in SIZE_SUFFIXES:
                 return parts[0].strip(), (size if size else suffix), color
             elif suffix and not color:
-                # Not a recognized size → treat as color, same as
-                # parse_name_color() in load_variants()
                 return parts[0].strip(), size, suffix
-        # Pattern 2: "Product - M" (dash pattern — size only)
         m = _dash_re.search(name)
         if m and m.group(1).upper() in SIZE_SUFFIXES:
             return name[:m.start()].strip(), (size if size else m.group(1)), color
@@ -208,20 +189,16 @@ def load_variants():
                               .str.strip()
                               .str.strip('"'))
 
-        # Strip size suffix from product name where it's embedded (e.g. "Dress/S" or "Dress - M")
-        # Always strip if the suffix is a known size — even if Size column is already populated
         _dash_re2 = re.compile(r'\s[-–]\s([A-Z0-9]{1,4})$')
 
         def _fix_variant_name(row):
             name = row["Product Name"]
             size = str(row.get("Size","")).strip() if "Size" in row.index else ""
-            # Pattern 1: "Product/S"
             if "/" in name:
                 parts = name.rsplit("/", 1)
                 suffix = parts[1].strip()
                 if suffix.upper() in SIZE_SUFFIXES_SET:
                     return parts[0].strip(), size if size else suffix
-            # Pattern 2: "Product - M"
             m = _dash_re2.search(name)
             if m and m.group(1).upper() in SIZE_SUFFIXES_SET:
                 return name[:m.start()].strip(), size if size else m.group(1)
@@ -267,13 +244,11 @@ def load_variants():
     size_agg["Status"] = size_agg["STR %"].apply(str_status)
     size_df = size_agg
 
-    # Build synthetic color rows for products that store color in name
     color_df["Product Name"] = color_df["Product Name"].apply(
         lambda n: re.sub(r"/[^/]+$", "", n).strip())
     existing_colors = set(color_df["Product Name"].str.lower())
 
     syn_src = size_df[size_df.get("_color", pd.Series(dtype=str)).notna()].copy() if "_color" in size_df.columns else pd.DataFrame()
-    # Re-extract from raw (before groupby) — use the _color before aggregation
     buf2 = _gdrive(GDRIVE_VARIANT_ID)
     if buf2:
         try:
@@ -317,9 +292,6 @@ def load_product_store():
     for col in ["Product Name","Brand","Category","Store"]:
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str).str.strip()
-    # Fix: strip size OR color suffix from product names so this matches the
-    # base names already used in load_products()/load_variants(). Store-level
-    # sales don't need to preserve color, so any non-size suffix is stripped.
     if "Product Name" in df.columns:
         SIZE_SUFFIXES_PS = {"XS","S","M","L","XL","2XL","3XL","4XL","5XL",
                             "ONE SIZE","FREE SIZE","36","37","38","39","40","41","42","43","44"}
@@ -338,12 +310,6 @@ def load_product_store():
     return df
 
 
-# Store names need normalizing: fetch_location_stock.py writes store names
-# from Odoo's raw location path (e.g. "WA/stock/LAZIMPAT" → "LAZIMPAT"),
-# which don't match the title-case names used everywhere else (LOCATION_ORDER,
-# POS sales data). Without this, stores like Lazimpat silently disappear from
-# any pivot/join keyed on store name (they're "LAZIMPAT" here vs "Lazimpat"
-# elsewhere).
 STORE_NAME_FIX = {
     "lazimpat":       "Lazimpat",
     "baneshwor":      "Baneshwor",
@@ -358,7 +324,6 @@ def _norm_store(name):
 
 @st.cache_resource(show_spinner=False)
 def load_location_stock():
-    """Load per-store stock from location_stock.xlsx — Store x Category sheet."""
     buf = _gdrive(GDRIVE_LOCSTK_ID)
     df = None
     if buf:
@@ -386,8 +351,6 @@ def load_location_stock():
     if not rows:
         return None
     out = pd.DataFrame(rows)
-    # A store may map to the same normalized name from multiple raw columns
-    # (shouldn't normally happen, but be safe) — sum instead of overwrite
     out = out.groupby(["Category","Store"], as_index=False)["Stock"].sum()
     return out
 
@@ -412,14 +375,12 @@ with st.sidebar:
     sel_brands = st.multiselect("Brand", brands, default=[brands[0]] if brands else [],
         help="Select one or more brands")
 
-    # Categories cascade from selected brands
     _brand_df = df_prod[df_prod["Brand"].isin(sel_brands)] if sel_brands else df_prod
     cats = sorted([c for c in _brand_df["Category"].unique()
                    if c.strip().lower() not in JUNK_CATS])
     sel_cats = st.multiselect("Category", cats, default=[],
         help="Select one or more categories — leave empty to include all")
 
-    # Sub-categories cascade from selected categories
     sel_subs = []
     if sel_cats and "Sub Category" in df_prod.columns:
         _cat_df = _brand_df[_brand_df["Category"].isin(sel_cats)]
@@ -429,12 +390,10 @@ with st.sidebar:
             sel_subs = st.multiselect("Sub Category", subs, default=[],
                 help="Select one or more sub-categories — leave empty to include all")
 
-    # Backwards-compat single values for header display
     sel_brand = ", ".join(sel_brands) if sel_brands else "All"
     sel_cat   = ", ".join(sel_cats)   if sel_cats   else "All"
     sel_sub   = ", ".join(sel_subs)   if sel_subs   else "All"
 
-    # Search by product name
     search = st.text_input("🔍 Search product", placeholder="Type to filter products…")
 
     st.markdown("---")
@@ -458,7 +417,6 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**📈 Velocity Settings**")
 
-    # Available windows depend on what columns the export has
     _has_30d  = "Recent Sold 30d"  in df_prod.columns if df_prod is not None else False
     _has_180d = "Recent Sold 180d" in df_prod.columns if df_prod is not None else False
 
@@ -526,12 +484,10 @@ if sel_subs and "Sub Category" in bdf.columns:
 if search.strip():
     bdf = bdf[bdf["Product Name"].str.contains(search.strip(), case=False, na=False)]
 
-# Season filter
 if sel_season != "All":
     season_map = bdf["Category"].apply(cat_season)
     bdf = bdf[season_map.isin([sel_season, "All-Season"])]
 
-# Date filter
 today = pd.Timestamp.today().normalize()
 if sel_date != "All time" and "Create Date" in bdf.columns:
     cd = bdf["Create Date"]
@@ -559,25 +515,6 @@ prod_sum["STR_Pct"]    = (prod_sum["Total_Sold"] /
 prod_sum["STR_Status"] = prod_sum["STR_Pct"].apply(str_status)
 prod_sum["Season"]     = prod_sum["Category"].apply(cat_season)
 
-# ── Velocity-based reorder — three-tier logic ─────────────────────────────────
-#
-# Tier 1 — No recent sales (Recent_60 = 0):
-#   → Reorder = 0. No current demand signal. Show product but don't order.
-#
-# Tier 2 — New product (days_live < 90):
-#   → Use recent velocity only (limited history, recent is most reliable)
-#   → velocity = Recent_60 / 60
-#
-# Tier 3 — Established product (days_live ≥ 90, has recent sales):
-#   → Use min(recent, lifetime) — conservative, avoids over-ordering
-#   → If trend is dying: recent < lifetime → use recent (smaller order)
-#   → If trending up: recent > lifetime → still limited by lifetime (safer)
-#   → velocity = min(Recent_60/60, Total_Sold/days_live)
-#
-# Display velocity (Rate/wk) always shows recent when available,
-# lifetime fallback when Recent_60 = 0.
-# ─────────────────────────────────────────────────────────────────────────────
-
 if "Create Date" in bdf.columns:
     dates = bdf.groupby("Product Name")["Create Date"].min().reset_index()
     dates["Create Date"] = pd.to_datetime(dates["Create Date"], errors="coerce")
@@ -588,7 +525,7 @@ else:
 
 has_recent = "Recent Sold 60d" in bdf.columns
 
-NEW_PRODUCT_DAYS = 90  # threshold for Tier 2 vs Tier 3
+NEW_PRODUCT_DAYS = 90
 
 if has_recent:
     recent_60 = bdf.groupby(grp_cols).agg(
@@ -597,7 +534,6 @@ if has_recent:
     prod_sum = prod_sum.merge(recent_60, on=grp_cols, how="left")
     prod_sum["Recent_60"] = prod_sum["Recent_60"].fillna(0)
 
-    # Also load 90d window if available
     has_recent_90 = "Recent Sold 90d" in bdf.columns
     if has_recent_90:
         recent_90 = bdf.groupby(grp_cols).agg(
@@ -608,25 +544,20 @@ if has_recent:
     else:
         prod_sum["Recent_90"] = prod_sum["Recent_60"]
 
-    # Pick the best available window for velocity calculation
-    # Use the exact window if available, else fall back to nearest
     _window_map = {}
     if "Recent Sold 30d"  in bdf.columns: _window_map[30]  = "Recent Sold 30d"
     if "Recent Sold 60d"  in bdf.columns: _window_map[60]  = "Recent Sold 60d"
     if "Recent Sold 90d"  in bdf.columns: _window_map[90]  = "Recent Sold 90d"
     if "Recent Sold 180d" in bdf.columns: _window_map[180] = "Recent Sold 180d"
 
-    # Find the closest available window to what was selected
     _available = sorted(_window_map.keys())
     if velocity_days in _window_map:
         _vel_window = velocity_days
     else:
-        # Use nearest available window
         _vel_window = min(_available, key=lambda x: abs(x - velocity_days))
 
     _vel_col = _window_map.get(_vel_window, "Recent Sold 60d")
 
-    # Aggregate the chosen window
     vel_sales_agg = bdf.groupby(grp_cols).agg(
         _vel_sales = (_vel_col, "sum"),
     ).reset_index()
@@ -662,7 +593,6 @@ if has_recent:
         prod_sum["_reorder_vel_daily"] * cover_days - prod_sum["Total_Stock"]
     ).clip(lower=0).round().astype(int)
 
-    # Tier counts — use the selected velocity window
     t1 = (prod_sum["_vel_sales"] == 0).sum()
     t2 = ((prod_sum["_vel_sales"] > 0) & (prod_sum["days_live"] < NEW_PRODUCT_DAYS)).sum()
     t3 = ((prod_sum["_vel_sales"] > 0) & (prod_sum["days_live"] >= NEW_PRODUCT_DAYS)).sum()
@@ -685,7 +615,6 @@ else:
         "⚠️ Using all-time sales for velocity — re-export products to get Recent Sold 60d")
 
 
-# Velocity tier label — always based on selected window vs lifetime
 if has_recent:
     def _tier_label(r):
         if r["_vel_sales"] == 0:               return "🔴 No demand"
@@ -698,12 +627,10 @@ if has_recent:
 else:
     prod_sum["Vel_Tier"] = "—"
 
-# Net_Sales for KPI display — use the window that matches velocity_days
 prod_sum["Net_Sales"] = prod_sum["_vel_sales"] if has_recent else prod_sum["Total_Sold"]
 prod_sum["weeks_live"]  = (prod_sum["days_live"] / 7).clip(lower=1)
 prod_sum["Est_Value"]   = prod_sum["Reorder_Velocity"] * prod_sum["Avg_Price"]
 
-# ── Last sold date — exact from export or estimated from windows ──────────────
 has_last_sold = "Last Sold Date" in bdf.columns and "Days Not Sold" in bdf.columns
 
 if has_last_sold:
@@ -734,10 +661,6 @@ else:
         else:         return f"> {_vel_window}d", _vel_window + 30
 
     if prod_sum.empty:
-        # apply(..., result_type="expand") can't infer column shape from
-        # zero rows — happens whenever the current Brand/Category/Sub
-        # Category/Search filters match no products at all (e.g. a
-        # non-clothing brand like AXIS-Y with the default filters)
         prod_sum["Last Sold"]      = pd.Series(dtype="object")
         prod_sum["Days Not Sold"]  = pd.Series(dtype="int64")
         prod_sum["_days_not_sold"] = pd.Series(dtype="int64")
@@ -747,7 +670,6 @@ else:
         prod_sum["Days Not Sold"]  = signals[1]
         prod_sum["_days_not_sold"] = signals[1]
 
-# ── Launch Date and Days Live (from Launch) ───────────────────────────────────
 has_launch = "Launch Date" in bdf.columns
 if has_launch:
     launch_agg = bdf.groupby(grp_cols).agg(
@@ -762,12 +684,38 @@ else:
     prod_sum["Days Live"]   = prod_sum["days_live"].astype(int)
     prod_sum["Launch Date"] = ""
 
+# ── FIX 1: STR%/zero-sales filter transparency ────────────────────────────────
+# Capture pre-filter state when there's an active search, so we can explain
+# to the user if their search matched something that then got hidden by the
+# STR%/zero-sales filters below — confirmed real case: searching for a
+# specific product and getting a bare "empty" table with no explanation was
+# genuinely confusing, even though the product legitimately existed and
+# matched the search correctly (it was just below the STR% floor).
+_search_prefilter = prod_sum.copy() if search.strip() else None
+
 # Apply STR filter
 prod_sum = prod_sum[prod_sum["STR_Pct"] >= min_str_pct]
 if not show_zero:
-    # Only hide products with zero sales entirely — keep well-stocked products
-    # (a product with stock > cover target has Reorder=0 but is still relevant)
     prod_sum = prod_sum[prod_sum["Total_Sold"] > 0]
+
+if _search_prefilter is not None and len(_search_prefilter) > len(prod_sum):
+    _kept_names = set(prod_sum["Product Name"])
+    _hidden = _search_prefilter[~_search_prefilter["Product Name"].isin(_kept_names)]
+    if not _hidden.empty:
+        _reasons = []
+        for _, _r in _hidden.head(5).iterrows():
+            _why = []
+            if _r["STR_Pct"] < min_str_pct:
+                _why.append(f"STR% {_r['STR_Pct']:.1f}% < min {min_str_pct}%")
+            if not show_zero and _r["Total_Sold"] == 0:
+                _why.append("zero sales")
+            _reasons.append(f"{_r['Product Name']} ({', '.join(_why) if _why else 'filtered'})")
+        _more = f" (+{len(_hidden) - 5} more)" if len(_hidden) > 5 else ""
+        st.warning(
+            f"⚠️ {len(_hidden)} product(s) matched your search but are hidden by current filters: "
+            f"{'; '.join(_reasons)}{_more}. Lower **'Min STR % to include'** or enable "
+            f"**'Show products with no sales'** in the sidebar to see them."
+        )
 
 prod_sum = prod_sum.sort_values("Total_Sold", ascending=False)
 
@@ -828,7 +776,6 @@ parent_cat_sum = prod_sum.groupby(["Category"]).agg(
     Est_Value     = ("Est_Value",       "sum"),
 ).reset_index().sort_values("Order_Vel", ascending=False)
 
-# Velocity at category level = total net sales / lookback days (not sum of individual velocities)
 parent_cat_sum["Velocity_Day"] = (parent_cat_sum["Net_Sales"] / velocity_days).round(2)
 parent_cat_sum["Weekly_Rate"]  = (parent_cat_sum["Velocity_Day"] * 7).round(1)
 parent_cat_sum["Avg_STR"]      = parent_cat_sum["Avg_STR"].round(1)
@@ -875,7 +822,6 @@ cat_sum = prod_sum.groupby(cat_grp).agg(
     Est_Value     = ("Est_Value",       "sum"),
 ).reset_index().sort_values(["Category","Order_Vel"], ascending=[True,False])
 
-# Velocity at category level = total net sales / lookback days (not sum of individual velocities)
 cat_sum["Velocity_Day"] = (cat_sum["Net_Sales"] / velocity_days).round(2)
 cat_sum["Weekly_Rate"]  = (cat_sum["Velocity_Day"] * 7).round(1)
 cat_sum["Avg_STR"]      = cat_sum["Avg_STR"].round(1)
@@ -914,7 +860,6 @@ st.markdown('<div class="sec">📐 Size Breakdown by Category</div>', unsafe_all
 if size_df is None:
     st.info("Size data not available — run `variant_export.py` first.")
 else:
-    # Filter size_df to current brand + category + sub filters
     _sz_cat = size_df[size_df["Brand"].str.strip().isin(sel_brands)].copy() if sel_brands else size_df.copy()
     _sz_cat = _sz_cat[~_sz_cat["Category"].str.strip().str.lower().isin(JUNK_CATS)]
     if sel_cats and "Category" in _sz_cat.columns:
@@ -927,7 +872,6 @@ else:
     if _sz_cat.empty:
         st.info("No size data for current filters.")
     else:
-        # Style functions needed for dataframe styling
         def _sz_reorder_style(val):
             if isinstance(val,(int,float)) and val > 0:
                 return "background-color:#dbeafe;color:#1e40af;font-weight:700"
@@ -942,7 +886,6 @@ else:
             if val >= 30: return "background-color:#fef9c3;color:#854d0e"
             return "background-color:#fee2e2;color:#991b1b"
 
-        # Aggregate by Category + Sub Category + Size
         sz_grp = ["Category"]
         if "Sub Category" in _sz_cat.columns and _sz_cat["Sub Category"].str.strip().ne("").any():
             sz_grp.append("Sub Category")
@@ -956,27 +899,19 @@ else:
             (sz_cat_agg["Units_Sold"] + sz_cat_agg["In_Stock"]).replace(0, float("nan")) * 100
         ).fillna(0).round(1)
 
-        # Rate/wk (lifetime) — size_df has no recent data, use lifetime avg days
         avg_days_live = prod_sum["days_live"].mean() if "days_live" in prod_sum.columns else 365
         sz_cat_agg["Rate/wk"] = (sz_cat_agg["Units_Sold"] / max(avg_days_live, 1) * 7).round(2)
 
-        # Reorder — use same velocity logic as category summary:
-        # Distribute each category's total Order(60d) proportionally by size's share of Units Sold
-        # This keeps size reorder CONSISTENT with category reorder total
-        #
-        # Build cat_key → Order(60d) lookup from cat_sum
         cat_order_lookup = {}
         for _, r in cat_sum.iterrows():
             key = tuple(str(r.get(c,"")).strip() for c in cat_grp)
             cat_order_lookup[key] = float(r.get(f"Order ({cover_days}d)", 0) or 0)
 
         def _size_reorder(row):
-            # Find this size's category group
-            key = tuple(str(row.get(c,"")).strip() for c in sz_grp[:-1])  # exclude Size
+            key = tuple(str(row.get(c,"")).strip() for c in sz_grp[:-1])
             cat_total_order = cat_order_lookup.get(key, 0)
             if cat_total_order == 0:
                 return 0
-            # This category's total units sold across all sizes
             cat_mask = pd.Series(True, index=sz_cat_agg.index)
             for ci, c in enumerate(sz_grp[:-1]):
                 cat_mask = cat_mask & (sz_cat_agg[sz_grp[ci]] == row[sz_grp[ci]])
@@ -988,7 +923,6 @@ else:
 
         sz_cat_agg["Reorder"] = sz_cat_agg.apply(_size_reorder, axis=1).astype(int)
 
-        # Sort sizes correctly
         sz_cat_agg["_sk"] = sz_cat_agg["Size"].apply(
             lambda s: SIZE_ORDER.index(s) if s in SIZE_ORDER else 99)
         sz_cat_agg = sz_cat_agg.sort_values(
@@ -1048,18 +982,16 @@ def _style_order(val):
 
 def _style_last_sold(val):
     if not isinstance(val, str): return ""
-    if "< 60d"   in val: return "color:#16a34a;font-weight:600"   # green — recent
-    if "60–90d"  in val: return "color:#d97706;font-weight:600"   # amber — getting old
-    if "> 90d"   in val: return "color:#dc2626;font-weight:600"   # red — stale
-    if "Never"   in val: return "color:#9ca3af"                   # grey — never sold
+    if "< 60d"   in val: return "color:#16a34a;font-weight:600"
+    if "60–90d"  in val: return "color:#d97706;font-weight:600"
+    if "> 90d"   in val: return "color:#dc2626;font-weight:600"
+    if "Never"   in val: return "color:#9ca3af"
     return ""
 
 def _style_last_sold(val):
-    """Color the Last Sold column based on Days Not Sold."""
     if not isinstance(val, str): return ""
     if val in ("Today", "1d ago"): return "color:#16a34a;font-weight:700"
     try:
-        # Extract number from "Nd ago"
         d = int(val.replace("d ago","").strip())
         if d <= 30:  return "color:#16a34a;font-weight:600"
         if d <= 90:  return "color:#d97706;font-weight:600"
@@ -1073,9 +1005,9 @@ def _style_last_sold(val):
 
 def _style_days_live(val):
     if not isinstance(val, (int, float)): return ""
-    if val <= 30:  return "color:#7c3aed"   # purple — very new
-    if val <= 90:  return "color:#0369a1"   # blue — new
-    return "color:#6b7280"                  # grey — established
+    if val <= 30:  return "color:#7c3aed"
+    if val <= 90:  return "color:#0369a1"
+    return "color:#6b7280"
 
 fmt_d = {"STR %":"{:.1f}%","Units Sold":"{:,.0f}","In Stock":"{:,.0f}",
          net_lbl:"{:,.0f}","Velocity (u/day)":"{:.3f}",
@@ -1108,11 +1040,10 @@ if size_df is not None:
         _sz["_size_share"] = (_sz["Units Sold"] / prod_total_sold.replace(0, float("nan"))).fillna(
             1.0 / _sz.groupby("Product Name")["Units Sold"].transform("count"))
         _sz["Weekly Rate"] = (_sz["_prod_rate"]    * _sz["_size_share"]).round(2)
-        # Order (Vel) = product's Reorder_Velocity (velocity-based, respects tiers)
-        # split by this size's share of product sales — consistent with category breakdown
         _sz["Order (Vel)"] = (_sz["_prod_reorder"] * _sz["_size_share"]).round().astype(int)
         sz = _sz
 
+# ── FIX 2: Color breakdown — don't hide colors with no visible way to see them ─
 cl = pd.DataFrame()
 if color_df is not None:
     _cl = color_df[color_df["Brand"].str.strip().isin(sel_brands)].copy() if sel_brands else color_df.copy()
@@ -1121,10 +1052,21 @@ if color_df is not None:
     filtered_products_set = set(prod_sum["Product Name"].str.strip())
     _cl = _cl[_cl["Product Name"].str.strip().isin(filtered_products_set)]
     if not _cl.empty:
-        _cl = _cl[_cl["Status"].isin(["Super Fast","Fast"])]
+        # When a specific search is active, show ALL colors regardless of
+        # Fast/Super Fast status — a slow-moving product's color breakdown
+        # is still genuinely useful (e.g. seeing one color dramatically
+        # underperforming its siblings), and this restriction previously had
+        # no visible toggle anywhere in the UI. Confirmed real case:
+        # searching for a specific product whose colors are all "Slow"
+        # produced a bare "No Fast/Super Fast colors" message with no way to
+        # see the data at all. Outside of an active search, keep the
+        # original Fast/Super Fast restriction — for a broad, unfiltered
+        # view across many products, limiting to fast movers avoids an
+        # overwhelming table.
+        if not search.strip():
+            _cl = _cl[_cl["Status"].isin(["Super Fast","Fast"])]
         _cl = _cl.sort_values(["Product Name","Units Sold"], ascending=[True,False])
 
-        # Add reorder qty per color — product reorder × color share of sales
         reorder_map = prod_sum.set_index("Product Name")["Reorder_Velocity"].to_dict()
         _cl["_prod_reorder"] = _cl["Product Name"].map(reorder_map).fillna(0)
         _prod_total = _cl.groupby("Product Name")["Units Sold"].transform("sum")
@@ -1166,7 +1108,10 @@ else:
 # ── Color Breakdown by Product (flat table) ───────────────────────────────────
 st.markdown('<div class="sec">🎨 Color Breakdown by Product</div>', unsafe_allow_html=True)
 if cl.empty:
-    st.info("No Fast/Super Fast colors for current filters.")
+    if search.strip():
+        st.info("No colors found matching this search.")
+    else:
+        st.info("No Fast/Super Fast colors for current filters.")
 else:
     disp_cl_cols = ["Product Name","Color","Units Sold","In Stock","STR %",
                     "Color Share %","Status",f"Order ({cover_days}d)"]
@@ -1184,7 +1129,11 @@ else:
         .format({"STR %":"{:.1f}%","Units Sold":"{:,.0f}","In Stock":"{:,.0f}",
                  "Color Share %":"{:.1f}%",f"Order ({cover_days}d)":"{:,.0f}"}))
     st.dataframe(_cst, width='stretch', hide_index=True)
-    st.caption(f"{len(cl):,} color rows · Fast/Super Fast only · 🔵 Order = product reorder × color share")
+    if search.strip():
+        st.caption(f"{len(cl):,} color rows · Showing ALL colors (search active — not limited to Fast/Super Fast) · "
+                   f"🔵 Order = product reorder × color share")
+    else:
+        st.caption(f"{len(cl):,} color rows · Fast/Super Fast only · 🔵 Order = product reorder × color share")
 
 # ── Overall Store Distribution (category-level summary) ──────────────────────
 st.markdown('<div class="sec">🏪 Overall Store Distribution</div>', unsafe_allow_html=True)
@@ -1198,7 +1147,6 @@ else:
         ps = ps[ps["Category"].str.strip().isin(sel_cats)]
     if search.strip() and "Product Name" in ps.columns:
         ps = ps[ps["Product Name"].str.contains(search.strip(), case=False, na=False)]
-    # Note: excluded stores are shown in table but get Order=0 (see store_totals logic)
 
     if ps.empty:
         st.info(f"No store sales data for **{sel_brand}**.")
@@ -1214,9 +1162,7 @@ else:
         store_totals = store_totals.sort_values("_order").drop(columns=["_order"])
         store_totals = store_totals[store_totals["Units_Sold"] > 0]
 
-        # Add current stock per store from location_stock
         if df_locstk is not None and sel_cats:
-            # Filter location stock to selected categories
             _lsk = df_locstk[df_locstk["Category"].isin(sel_cats)] if sel_cats else df_locstk
             _store_stock = _lsk.groupby("Store")["Stock"].sum().reset_index()
             _store_stock.columns = ["Store","On Hand"]
@@ -1230,8 +1176,6 @@ else:
         else:
             store_totals["On Hand"] = None
 
-        # Share % and Order only from active (non-excluded) stores
-        # Lush stores shown for visibility but don't receive reorder allocation
         active_mask   = store_totals["Store"].isin(active_stores)
         grand_sold    = store_totals.loc[active_mask, "Units_Sold"].sum()
         store_totals["Share_%"]   = store_totals.apply(
@@ -1290,19 +1234,16 @@ else:
                         f'</div></div>', unsafe_allow_html=True)
 
         with tab_catstore:
-            # Apply sub-category filter to store data (ps is only filtered by category)
             ps_cat = ps.copy()
             if sel_subs and "Sub Category" in ps_cat.columns:
                 ps_cat = ps_cat[ps_cat["Sub Category"].isin(sel_subs)]
 
             grp_key = ["Category","Sub Category","Store"] if "Sub Category" in ps_cat.columns else ["Category","Store"]
             cat_store = ps_cat.groupby(grp_key).agg(Units_Sold=("Units Sold","sum")).reset_index()
-            # Show all stores in units sold table but only active stores in order table
             all_stores_present   = [s for s in LOCATION_ORDER if s in cat_store["Store"].unique()]
             stores_present       = [s for s in active_stores   if s in cat_store["Store"].unique()]
             pivot_cols = ["Category","Sub Category"] if "Sub Category" in cat_store.columns else ["Category"]
 
-            # ── Units Sold pivot — shows ALL stores including Lush ──────────────
             pivot = cat_store.pivot_table(
                 index=pivot_cols, columns="Store", values="Units_Sold",
                 aggfunc="sum", fill_value=0
@@ -1319,13 +1260,6 @@ else:
                 .style.format({c: "{:,.0f}" for c in all_store_cols + ["Total"]}),
                 width='stretch', hide_index=True)
 
-            # ── Total Stock pivot per Category [× Sub Category] per Store ────
-            # location_stock.xlsx only tracks stock at parent Category level.
-            # When Sub Category rows exist, estimate each sub-category's
-            # stock by splitting the category's stock proportional to that
-            # sub-category's share of sales at that store — same approach
-            # used for the Order pivot below. This is an ESTIMATE, not a
-            # real per-sub-category stock count.
             stk_pivot = None
             if df_locstk is not None:
                 _lsk_cat = df_locstk.copy()
@@ -1385,11 +1319,9 @@ else:
                                 .style.format({c: "{:,.0f}" for c in _stk_store_cols + ["Total Stock"]}),
                                 width='stretch', hide_index=True)
 
-            # ── Reorder Qty pivot — distribute category Order(60d) by store share ──
             st.markdown(f"**Order ({cover_days}d) per Category per Store**")
             st.caption("Each category's total reorder qty split by that store's share of sales")
 
-            # Build category total reorder lookup from cat_sum
             cat_reorder_map = {}
             for _, r in cat_sum.iterrows():
                 key = tuple(r[c] for c in cat_grp)
@@ -1398,7 +1330,6 @@ else:
             reorder_rows = []
             for _, row in pivot.iterrows():
                 key = tuple(row[c] for c in pivot_cols)
-                # Match against cat_grp keys (may differ if has_sub mismatches)
                 total_reorder = cat_reorder_map.get(key, 0)
                 if not isinstance(total_reorder,(int,float)): total_reorder = 0
                 row_total_sold = row["Total"]
@@ -1454,9 +1385,7 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
     full.to_excel(writer, sheet_name="Product Reorder Plan", index=False)
 
     if size_df is not None and "sz" in dir() and not sz.empty:
-        # By Size — same detail level as By Color sheet
         sz_exp = sz.copy()
-        # Add product-level columns (Trend, Launch Date, Last Sold, velocity)
         prod_merge_cols = ["Product Name","Brand","Category"] + \
             (["Sub Category"] if "Sub Category" in prod_sum.columns else []) + \
             ["STR_Status","STR_Pct","Total_Sold","Net_Sales",
@@ -1487,32 +1416,26 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
         ]
         export_sz_cols = [c for c in export_sz_cols if c in sz_exp.columns]
 
-        # Add Size Share % if not already there
         if "Size Share %" not in sz_exp.columns and "_size_share" in sz_exp.columns:
             sz_exp["Size Share %"] = (sz_exp["_size_share"] * 100).round(1)
 
         sz_exp[export_sz_cols].to_excel(writer, sheet_name="By Size (Product)", index=False)
 
-    # Size × Category breakdown
     if size_df is not None and "sz_cat_agg" in dir() and not sz_cat_agg.empty:
         sz_cat_exp = sz_cat_agg.rename(columns={"Units_Sold":"Units Sold","In_Stock":"In Stock"}) \
             if "Units_Sold" in sz_cat_agg.columns else sz_cat_agg.copy()
         sz_cat_exp.to_excel(writer, sheet_name="Size × Category", index=False)
 
     if color_df is not None and "cl" in dir() and not cl.empty:
-        # Build color reorder sheet — matches product level data exactly
-        # Get all colors (not just Fast/Super Fast) for the export
         _cl_all = color_df[color_df["Brand"].str.strip().isin(sel_brands)].copy() if sel_brands else color_df.copy()
         if sel_cats:
             _cl_all = _cl_all[_cl_all["Category"].str.strip().isin(sel_cats)]
         if sel_subs:
             _cl_all = _cl_all[_cl_all["Sub Category"].str.strip().isin(sel_subs)]
-        # Only keep products that are in our filtered prod_sum
         _cl_all = _cl_all[_cl_all["Product Name"].str.strip().isin(
             set(prod_sum["Product Name"].str.strip()))]
 
         if not _cl_all.empty:
-            # Merge product-level data (velocity, trend, order qty) onto color rows
             prod_export_cols = ["Product Name","Brand","Category","Sub Category",
                                 "STR_Status","STR_Pct","Total_Sold","Net_Sales",
                                 "Daily_Velocity","Weekly_Rate","Vel_Tier",
@@ -1523,20 +1446,17 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
             cl_exp = _cl_all.merge(_prod_for_color, on="Product Name", how="left",
                                    suffixes=("","_prod"))
 
-            # Share of this color within the product
             _color_totals = _cl_all.groupby("Product Name")["Units Sold"].sum().rename("_color_total")
             cl_exp = cl_exp.merge(_color_totals, on="Product Name", how="left")
             cl_exp["Color Share %"] = (
                 cl_exp["Units Sold"] / cl_exp["_color_total"].replace(0, float("nan")) * 100
             ).fillna(0).round(1)
 
-            # Distribute product reorder by color share
             cl_exp[f"Order ({cover_days}d)"] = (
                 cl_exp["Reorder_Velocity"].fillna(0) *
                 cl_exp["Color Share %"] / 100
             ).round().astype(int)
 
-            # Clean and rename for export
             cl_exp = cl_exp.rename(columns={
                 "STR_Status":"Status","STR_Pct":"STR % (product)",
                 "Total_Sold":"Total Units Sold","Net_Sales":net_lbl,
@@ -1547,7 +1467,6 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                 "In Stock":"In Stock (color)",
             })
 
-            # Fix: drop duplicate Status column from merge
             if "Status.1" in cl_exp.columns:
                 cl_exp = cl_exp.drop(columns=["Status.1"])
 
@@ -1572,7 +1491,6 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                                      "Order_Vel":f"Order ({cover_days}d)"})\
             .to_excel(writer, sheet_name="By Store", index=False)
 
-        # ── Category × Store — combined Sold / Order / Stock in ONE sheet ────
         if "ps" in dir() and not ps.empty:
             try:
                 ps_dl = ps.copy()
@@ -1591,7 +1509,6 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                 pivot_dl["Total"] = pivot_dl[store_cols_dl].sum(axis=1)
                 pivot_dl = pivot_dl.sort_values("Total", ascending=False)
 
-                # ── Order rows ─────────────────────────────────────────────
                 order_rows_dl = []
                 for _, row in pivot_dl.iterrows():
                     key = tuple(row[c] for c in pivot_cols_dl)
@@ -1611,7 +1528,6 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                     order_rows_dl.append(new_row)
                 order_df_dl = pd.DataFrame(order_rows_dl)
 
-                # ── Stock rows (Sub Category split is an estimate) ──────────
                 stock_df_dl = None
                 if df_locstk is not None:
                     _lsk_dl = df_locstk.copy()
@@ -1651,7 +1567,6 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                         else:
                             stock_df_dl = stk_dl
 
-                # ── Stack Sold / Order / Stock into one long table ──────────
                 all_store_cols_combined = store_cols_dl.copy()
                 if stock_df_dl is not None:
                     for c in stock_df_dl.columns:
@@ -1684,7 +1599,7 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                 combined = combined.sort_values(sort_cols + ["_mrank"]).drop(columns=["_mrank"])
                 combined.to_excel(writer, sheet_name="Category × Store", index=False)
             except Exception as e:
-                pass  # Skip if pivot fails
+                pass
 
 out.seek(0)
 fname = f"reorder_{'-'.join(sel_brands) if sel_brands else 'All'}_{('-'.join(sel_cats) if sel_cats else 'AllCats').replace(' ','_')[:30]}.xlsx"
