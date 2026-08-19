@@ -147,15 +147,32 @@ def load_products():
         df["Color"]        = fixed[2]
     if "Create Date" in df.columns:
         df["Create Date"] = pd.to_datetime(df["Create Date"], errors="coerce")
-    SKIP = {"All","Saleable","PoS",""}
-    if "Category" in df.columns and df["Category"].str.contains("/", na=False).any():
-        def split_cat(raw):
-            parts = [p.strip() for p in str(raw).split("/") if p.strip() not in SKIP]
-            if not parts: return "", ""
-            return (parts[0], parts[1]) if len(parts) > 1 else (parts[0], "")
-        sp = df["Category"].apply(split_cat)
-        df["Category"]     = sp.apply(lambda x: x[0])
-        df["Sub Category"] = sp.apply(lambda x: x[1])
+    SKIP = {"All", "Saleable", "PoS", ""}
+    if "Category" in df.columns:
+        has_slash = df["Category"].str.contains("/", na=False).any()
+        already_has_subcat_col = "Sub Category" in df.columns and df["Sub Category"].astype(str).str.strip().ne("").any()
+
+        if has_slash:
+            def split_cat(raw):
+                parts = [p.strip() for p in str(raw).split("/") if p.strip() not in SKIP]
+                if not parts: return "", ""
+                return (parts[0], parts[1]) if len(parts) > 1 else (parts[0], "")
+            sp = df["Category"].apply(split_cat)
+            df["Category"]     = sp.apply(lambda x: x[0])
+            df["Sub Category"] = sp.apply(lambda x: x[1])
+            st.session_state["_subcat_source"] = "Split from hierarchical Category string (contains '/')"
+
+        elif already_has_subcat_col:
+            df["Sub Category"] = df["Sub Category"].fillna("").astype(str).str.strip()
+            st.session_state["_subcat_source"] = "Read directly from a separate 'Sub Category' column already in the export"
+
+        else:
+            df["Sub Category"] = ""
+            st.session_state["_subcat_source"] = (
+                "NOT FOUND -- Category has no '/' and there's no separate 'Sub Category' "
+                "column in this export. The upstream export script needs to include "
+                "sub-category data for this filter to appear."
+            )
     return df
 
 @st.cache_resource(show_spinner=False)
