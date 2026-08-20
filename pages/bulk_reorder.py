@@ -375,13 +375,29 @@ def load_location_stock():
 # ── Load ──────────────────────────────────────────────────────────────────────
 with st.spinner("Loading data…"):
     df_prod           = load_products()
+
     size_df, color_df = load_variants()
     df_prodstore      = load_product_store()
     df_locstk         = load_location_stock()
 
 if df_prod is None:
     st.error("Could not load product data."); st.stop()
-
+with st.sidebar.expander("🔍 Sub Category Diagnostic", expanded=True):
+    if "Sub Category" not in df_prod.columns:
+        st.error("'Sub Category' column does NOT exist in df_prod at all.")
+        st.write("Actual columns found:", list(df_prod.columns))
+    else:
+        non_empty = df_prod["Sub Category"].astype(str).str.strip().ne("")
+        n_total = len(df_prod)
+        n_non_empty = non_empty.sum()
+        st.write(f"**Column exists.** {n_non_empty:,} / {n_total:,} rows have a non-empty value ({n_non_empty/n_total*100:.1f}%).")
+        if n_non_empty > 0:
+            sample = df_prod.loc[non_empty, ["Category", "Sub Category"]].head(10)
+            st.write("Sample of actual values:")
+            st.dataframe(sample, hide_index=True)
+        else:
+            st.warning("Column exists but every single value is blank.")
+        st.write(f"Detection source: **{st.session_state.get('_subcat_source', 'not set')}**")
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### 🛒 Bulk Reorder Tool")
