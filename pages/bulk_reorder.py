@@ -147,12 +147,31 @@ def load_products():
         df["Color"]        = fixed[2]
     if "Create Date" in df.columns:
         df["Create Date"] = pd.to_datetime(df["Create Date"], errors="coerce")
+
+    # ── Category / Sub Category ──────────────────────────────────────────
+    # FIXED PRECEDENCE: an existing, genuinely populated Sub Category
+    # column is now checked and preferred FIRST. The original order
+    # checked "does Category still contain '/' anywhere" before checking
+    # whether Sub Category already had real data -- which meant a
+    # perfectly good Sub Category column got silently overwritten by the
+    # (broken, 3-level-only) slash-split result whenever ANY row's
+    # Category string still had a slash in it. Confirmed via diagnostic
+    # that this was happening: Category still had slashes for essentially
+    # every row, so the split branch always won and clobbered real data.
     SKIP = {"All", "Saleable", "PoS", ""}
     if "Category" in df.columns:
+        already_has_subcat_col = ("Sub Category" in df.columns and
+                                  df["Sub Category"].astype(str).str.strip().ne("").any())
         has_slash = df["Category"].str.contains("/", na=False).any()
-        already_has_subcat_col = "Sub Category" in df.columns and df["Sub Category"].astype(str).str.strip().ne("").any()
 
-        if has_slash:
+        if already_has_subcat_col:
+            # Preserve it as-is -- it's already been through the string
+            # cleanup loop above (fillna/strip), nothing more to do.
+            # Category itself may still contain slashes for some rows;
+            # leave that alone too rather than re-deriving from it.
+            st.session_state["_subcat_source"] = "Read directly from a separate 'Sub Category' column already in the export (preserved, not overwritten)"
+
+        elif has_slash:
             def split_cat(raw):
                 parts = [p.strip() for p in str(raw).split("/") if p.strip() not in SKIP]
                 if not parts: return "", ""
@@ -161,10 +180,6 @@ def load_products():
             df["Category"]     = sp.apply(lambda x: x[0])
             df["Sub Category"] = sp.apply(lambda x: x[1])
             st.session_state["_subcat_source"] = "Split from hierarchical Category string (contains '/')"
-
-        elif already_has_subcat_col:
-            df["Sub Category"] = df["Sub Category"].fillna("").astype(str).str.strip()
-            st.session_state["_subcat_source"] = "Read directly from a separate 'Sub Category' column already in the export"
 
         else:
             df["Sub Category"] = ""
@@ -375,14 +390,14 @@ def load_location_stock():
 # ── Load ──────────────────────────────────────────────────────────────────────
 with st.spinner("Loading data…"):
     df_prod           = load_products()
-
     size_df, color_df = load_variants()
     df_prodstore      = load_product_store()
     df_locstk         = load_location_stock()
 
 if df_prod is None:
     st.error("Could not load product data."); st.stop()
-with st.sidebar.expander("🔍 Sub Category Diagnostic", expanded=True):
+
+with st.sidebar.expander("🔍 Sub Category Diagnostic", expanded=False):
     if "Sub Category" not in df_prod.columns:
         st.error("'Sub Category' column does NOT exist in df_prod at all.")
         st.write("Actual columns found:", list(df_prod.columns))
@@ -398,6 +413,7 @@ with st.sidebar.expander("🔍 Sub Category Diagnostic", expanded=True):
         else:
             st.warning("Column exists but every single value is blank.")
         st.write(f"Detection source: **{st.session_state.get('_subcat_source', 'not set')}**")
+
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### 🛒 Bulk Reorder Tool")
@@ -718,12 +734,6 @@ else:
     prod_sum["Launch Date"] = ""
 
 # ── FIX 1: STR%/zero-sales filter transparency ────────────────────────────────
-# Capture pre-filter state when there's an active search, so we can explain
-# to the user if their search matched something that then got hidden by the
-# STR%/zero-sales filters below — confirmed real case: searching for a
-# specific product and getting a bare "empty" table with no explanation was
-# genuinely confusing, even though the product legitimately existed and
-# matched the search correctly (it was just below the STR% floor).
 _search_prefilter = prod_sum.copy() if search.strip() else None
 
 # Apply STR filter
@@ -1015,14 +1025,6 @@ def _style_order(val):
 
 def _style_last_sold(val):
     if not isinstance(val, str): return ""
-    if "< 60d"   in val: return "color:#16a34a;font-weight:600"
-    if "60–90d"  in val: return "color:#d97706;font-weight:600"
-    if "> 90d"   in val: return "color:#dc2626;font-weight:600"
-    if "Never"   in val: return "color:#9ca3af"
-    return ""
-
-def _style_last_sold(val):
-    if not isinstance(val, str): return ""
     if val in ("Today", "1d ago"): return "color:#16a34a;font-weight:700"
     try:
         d = int(val.replace("d ago","").strip())
@@ -1085,17 +1087,6 @@ if color_df is not None:
     filtered_products_set = set(prod_sum["Product Name"].str.strip())
     _cl = _cl[_cl["Product Name"].str.strip().isin(filtered_products_set)]
     if not _cl.empty:
-        # When a specific search is active, show ALL colors regardless of
-        # Fast/Super Fast status — a slow-moving product's color breakdown
-        # is still genuinely useful (e.g. seeing one color dramatically
-        # underperforming its siblings), and this restriction previously had
-        # no visible toggle anywhere in the UI. Confirmed real case:
-        # searching for a specific product whose colors are all "Slow"
-        # produced a bare "No Fast/Super Fast colors" message with no way to
-        # see the data at all. Outside of an active search, keep the
-        # original Fast/Super Fast restriction — for a broad, unfiltered
-        # view across many products, limiting to fast movers avoids an
-        # overwhelming table.
         if not search.strip():
             _cl = _cl[_cl["Status"].isin(["Super Fast","Fast"])]
         _cl = _cl.sort_values(["Product Name","Units Sold"], ascending=[True,False])
