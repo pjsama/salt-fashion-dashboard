@@ -66,15 +66,6 @@ DOC_COLORS = {
 }
 STR_ORDER = ["Super Fast","Fast","Medium","Slow","Dead"]
 
-SKIP_PARTS = {"All","Saleable","PoS",""}
-
-def split_odoo_category(raw):
-    parts = [p.strip() for p in str(raw).split("/")]
-    parts = [p for p in parts if p and p not in SKIP_PARTS]
-    if not parts: return "", ""
-    if len(parts) == 1: return parts[0], ""
-    return parts[-2], parts[-1]
-
 # ── Odoo internal path segments to skip ──────────────────────────────────────
 SKIP_PARTS = {"All","Saleable","PoS",""}
 
@@ -175,16 +166,31 @@ def clean_df(df):
     if "SKU / Variant" in df.columns and "SKU / Internal Ref" not in df.columns:
         df["SKU / Internal Ref"] = df["SKU / Variant"]
 
-    # ── Fix Category: split 'Jacket / Fur Regular' into parent + sub ─────────
-    # If Sub Category column doesn't exist OR Category still has slashes, split now
-    has_sub = "Sub Category" in df.columns
-    has_slashes = df["Category"].str.contains("/", na=False).any() if "Category" in df.columns else False
+    # ── Category / Sub Category ──────────────────────────────────────────
+    # FIXED PRECEDENCE: check whether Sub Category ALREADY has genuine
+    # data FIRST, before trying to split it out of Category. The original
+    # order checked "does Category still contain '/' anywhere" (or "Sub
+    # Category column doesn't exist") first -- so a perfectly good,
+    # already-populated Sub Category column got silently overwritten by
+    # split_odoo_category() every time ANY row's Category string still
+    # had a slash in it, which -- confirmed via diagnostic in this
+    # project -- is true for essentially every row in this export. That
+    # meant the split branch always won and clobbered real data.
+    has_sub = ("Sub Category" in df.columns and
+              df["Sub Category"].astype(str).str.strip().ne("").any())
 
-    if "Category" in df.columns and (not has_sub or has_slashes):
-        split = df["Category"].apply(split_odoo_category)
-        df["Category"]     = split.apply(lambda x: x[0])
-        df["Sub Category"] = split.apply(lambda x: x[1])
-    elif not has_sub:
+    if "Category" in df.columns:
+        if has_sub:
+            # Preserve as-is -- already cleaned above (fillna/strip).
+            # Category may still contain slashes for some rows; leave
+            # that alone too rather than re-deriving from it and
+            # potentially overwriting good Sub Category data.
+            pass
+        else:
+            split = df["Category"].apply(split_odoo_category)
+            df["Category"]     = split.apply(lambda x: x[0])
+            df["Sub Category"] = split.apply(lambda x: x[1])
+    elif "Sub Category" not in df.columns:
         df["Sub Category"] = ""
 
     return df
@@ -296,6 +302,22 @@ def main():
         st.markdown("**Intelligence Dashboard**")
         st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
 
+        # ── Sub Category diagnostic (same as bulk_reorder.py, for parity) ──
+        with st.expander("🔍 Sub Category Diagnostic", expanded=False):
+            if "Sub Category" not in df.columns:
+                st.error("'Sub Category' column does NOT exist at all.")
+            else:
+                non_empty = df["Sub Category"].astype(str).str.strip().ne("")
+                n_total = len(df)
+                n_non_empty = non_empty.sum()
+                st.write(f"**Column exists.** {n_non_empty:,} / {n_total:,} rows "
+                        f"have a non-empty value ({n_non_empty/n_total*100:.1f}%).")
+                if n_non_empty > 0:
+                    st.dataframe(df.loc[non_empty, ["Category", "Sub Category"]].head(10),
+                                hide_index=True)
+
+        st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
+
         df["Brand"] = df["Brand"].fillna("").astype(str).str.strip()
         brands = sorted([b for b in df["Brand"].unique()
                          if b and b not in ("nan","True","False","None","")])
@@ -330,9 +352,15 @@ def main():
         sel_cats = st.multiselect("Category (Parent)", options=parent_cats, default=parent_cats,
                                   help="These are the main categories e.g. Jacket, Denim Pant, Shirt")
 
-        # Sub category filter (optional — only shown if parent selected)
+        # ── Sub category filter ────────────────────────────────────────────
+        # FIXED: previously required len(sel_cats) < len(parent_cats) --
+        # meaning it never showed in the default "all categories selected"
+        # state, since that's exactly len(sel_cats) == len(parent_cats).
+        # Now it just needs at least one category selected and real
+        # sub-category options to offer, matching how the equivalent
+        # filter in bulk_reorder.py already worked correctly.
         sel_sub_cats = []
-        if sel_cats and len(sel_cats) < len(parent_cats):
+        if sel_cats:
             sub_options = sorted([str(c) for c in bdf_cats[bdf_cats["Category"].isin(sel_cats)]["Sub Category"].unique()
                                   if str(c).strip() not in ("nan","","None")])
             if sub_options:
@@ -563,8 +591,12 @@ def main():
         st.dataframe(pivot.sort_values("Total",ascending=False).head(30),
                      use_container_width=True)
 
-    # Sub category breakdown (only when a specific parent is filtered)
-    if sel_cats and len(sel_cats) <= 3 and "Sub Category" in f.columns:
+    # Sub category breakdown
+    # FIXED: previously required len(sel_cats) <= 3 -- meaning it never
+    # showed in the default "all categories selected" state if there were
+    # more than 3 parent categories. Now it just checks whether there's
+    # any real Sub Category data at all in the current filtered view.
+    if "Sub Category" in f.columns:
         sub_vals = f["Sub Category"].dropna()
         sub_vals = sub_vals[sub_vals.astype(str).str.strip().ne("")]
         if len(sub_vals) > 0:
