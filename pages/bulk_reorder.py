@@ -403,6 +403,49 @@ def load_location_stock():
 
 
 @st.cache_resource(show_spinner=False)
+def load_location_stock_subcategory():
+    """Loads the 'Store x SubCategory' sheet from location_stock.xlsx --
+    REAL per-(category, sub-category) stock from stock.quant, not a
+    proportional estimate. Requires fetch_location_stock.py's updated
+    version (the one that writes this extra sheet); older location_stock
+    files won't have it, in which case this returns None and the
+    dashboard falls back to the old estimate so nothing breaks."""
+    buf = _gdrive(GDRIVE_LOCSTK_ID)
+    df = None
+    if buf:
+        try: df = pd.read_excel(buf, sheet_name="Store x SubCategory", engine="openpyxl")
+        except: pass
+    if df is None:
+        base = r"C:\Users\Legion\Desktop\odoo_export\exports"
+        files = sorted(Path(base).glob("location_stock_*.xlsx"), reverse=True) if Path(base).exists() else []
+        if files:
+            try: df = pd.read_excel(files[0], sheet_name="Store x SubCategory", engine="openpyxl")
+            except: pass
+    if df is None or df.empty: return None
+    df.columns = [str(c).strip() for c in df.columns]
+    if "Category" not in df.columns or "Sub Category" not in df.columns:
+        return None
+    store_cols = [c for c in df.columns if c not in ("Category", "Sub Category")]
+    rows = []
+    for _, row in df.iterrows():
+        cat = str(row["Category"]).strip()
+        sub = str(row["Sub Category"]).strip()
+        if sub.lower() == "nan":
+            sub = ""
+        if not cat or cat.lower() in ("nan", ""):
+            continue
+        for store in store_cols:
+            qty = row[store]
+            rows.append({"Category": cat, "Sub Category": sub, "Store": _norm_store(store),
+                         "Stock": max(0.0, float(qty) if not pd.isna(qty) else 0.0)})
+    if not rows:
+        return None
+    out = pd.DataFrame(rows)
+    out = out.groupby(["Category","Sub Category","Store"], as_index=False)["Stock"].sum()
+    return out
+
+
+@st.cache_resource(show_spinner=False)
 def load_daily_sales():
     """Loads daily_sales.xlsx (from daily_sales_export.py) -- one row
     per (Variant_ID, Date) with units sold that day. Used only by the
@@ -475,6 +518,7 @@ with st.spinner("Loading data…"):
     size_df, color_df = load_variants()
     df_prodstore      = load_product_store()
     df_locstk         = load_location_stock()
+    df_locstk_sub     = load_location_stock_subcategory()
     df_daily_sales     = load_daily_sales()
 
 if df_prod is None:
@@ -599,9 +643,22 @@ with st.sidebar:
     )
     active_stores = [s for s in LOCATION_ORDER if s not in excluded_stores]
     date_opts = ["All time","Last 30 days","Last 60 days","Last 90 days",
-                 "Older than 30 days","Older than 60 days","Older than 90 days"]
+                 "Older than 30 days","Older than 60 days","Older than 90 days",
+                 "Custom Range"]
     sel_date = st.selectbox("Date filter", date_opts, index=0,
-        help="'Older than X' excludes new arrivals that haven't had time to sell")
+        help="'Older than X' excludes new arrivals that haven't had time to sell. "
+             "'Custom Range' lets you pick any Create Date window directly.")
+
+    custom_start = custom_end = None
+    if sel_date == "Custom Range":
+        _today_default = pd.Timestamp.today().normalize()
+        _dcol1, _dcol2 = st.columns(2)
+        with _dcol1:
+            custom_start = st.date_input("From", value=_today_default - pd.Timedelta(days=90))
+        with _dcol2:
+            custom_end = st.date_input("To", value=_today_default)
+        if custom_start and custom_end and custom_start > custom_end:
+            st.error("'From' date is after 'To' date -- swap them.")
 
     st.markdown("---")
     st.markdown("**🏷️ Sale Period Filter**")
@@ -655,6 +712,8 @@ if sel_date != "All time" and "Create Date" in bdf.columns:
     elif "Older than 30" in sel_date:    bdf = bdf[cd < today - pd.Timedelta(days=30)]
     elif "Older than 60" in sel_date:    bdf = bdf[cd < today - pd.Timedelta(days=60)]
     elif "Older than 90" in sel_date:    bdf = bdf[cd < today - pd.Timedelta(days=90)]
+    elif sel_date == "Custom Range" and custom_start and custom_end and custom_start <= custom_end:
+        bdf = bdf[(cd >= pd.Timestamp(custom_start)) & (cd <= pd.Timestamp(custom_end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))]
 
 # ── Apply sale-period exclusion (if selected) ─────────────────────────────────
 # Subtracts sale-window units directly from bdf's own sales columns, BEFORE
@@ -911,7 +970,10 @@ filter_parts = [sel_brand, sel_cat]
 if sel_sub != "All": filter_parts.append(sel_sub)
 if search.strip(): filter_parts.append(f'"{search}"')
 filter_parts.append(sel_season_raw)
-if sel_date != "All time": filter_parts.append(sel_date)
+if sel_date == "Custom Range" and custom_start and custom_end:
+    filter_parts.append(f"{custom_start} to {custom_end}")
+elif sel_date != "All time":
+    filter_parts.append(sel_date)
 st.markdown(
     f"**{'  ·  '.join(filter_parts)}** · STR ≥ {min_str_pct}% · "
     f"Velocity {velocity_days}d lookback · {cover_days}d cover · {today.strftime('%b %d, %Y')}")
@@ -1421,7 +1483,41 @@ else:
                 width='stretch', hide_index=True)
 
             stk_pivot = None
-            if df_locstk is not None:
+            if df_locstk_sub is not None:
+                # REAL per-sub-category stock, straight from stock.quant via
+                # fetch_location_stock.py's "Store x SubCategory" sheet --
+                # no estimation involved.
+                _lsk_sub = df_locstk_sub.copy()
+                if sel_cats:
+                    _lsk_sub = _lsk_sub[_lsk_sub["Category"].isin(sel_cats)]
+                if sel_subs:
+                    _lsk_sub = _lsk_sub[_lsk_sub["Sub Category"].isin(sel_subs)]
+                if not _lsk_sub.empty:
+                    has_real_subcat = _lsk_sub["Sub Category"].astype(str).str.strip().ne("").any()
+                    index_cols = ["Category", "Sub Category"] if has_real_subcat else ["Category"]
+                    stk_sub_pivot = _lsk_sub.pivot_table(
+                        index=index_cols, columns="Store", values="Stock",
+                        aggfunc="sum", fill_value=0
+                    ).reset_index()
+                    stk_sub_pivot.columns.name = None
+                    _stk_store_cols = [c for c in all_store_cols if c in stk_sub_pivot.columns]
+                    stk_sub_pivot["Total Stock"] = stk_sub_pivot[_stk_store_cols].sum(axis=1)
+                    stk_sub_pivot = stk_sub_pivot.sort_values("Total Stock", ascending=False)
+
+                    if stk_sub_pivot["Total Stock"].sum() > 0:
+                        st.markdown("**Total Stock per Category per Store**")
+                        st.caption(
+                            "Real per-sub-category stock from stock.quant (fetch_location_stock.py) "
+                            "-- not an estimate."
+                        )
+                        st.dataframe(
+                            stk_sub_pivot[index_cols + _stk_store_cols + ["Total Stock"]]
+                            .style.format({c: "{:,.0f}" for c in _stk_store_cols + ["Total Stock"]}),
+                            width='stretch', hide_index=True)
+            elif df_locstk is not None:
+                # Fallback: older location_stock.xlsx without the new sheet --
+                # parent-category level only, no sub-category breakdown at all
+                # (no estimate shown, since that estimate was the problem).
                 _lsk_cat = df_locstk.copy()
                 if sel_cats:
                     _lsk_cat = _lsk_cat[_lsk_cat["Category"].isin(sel_cats)]
@@ -1435,49 +1531,17 @@ else:
                     stk_pivot["Total Stock"] = stk_pivot[_stk_store_cols].sum(axis=1)
                     stk_pivot = stk_pivot.sort_values("Total Stock", ascending=False)
 
-                    has_subcat_pivot = ("Sub Category" in pivot.columns and
-                                        pivot["Sub Category"].astype(str).str.strip().ne("").any())
-
                     if stk_pivot["Total Stock"].sum() > 0:
                         st.markdown("**Total Stock per Category per Store**")
-
-                        if has_subcat_pivot and _stk_store_cols:
-                            cat_sales_totals = pivot.groupby("Category")[_stk_store_cols].sum()
-                            stk_by_cat = stk_pivot.set_index("Category")
-
-                            stk_sub_rows = []
-                            for _, row in pivot.iterrows():
-                                cat = row["Category"]
-                                new_row = {"Category": cat, "Sub Category": row.get("Sub Category","")}
-                                if cat in stk_by_cat.index and cat in cat_sales_totals.index:
-                                    for store in _stk_store_cols:
-                                        cat_total_sold_store = cat_sales_totals.loc[cat, store]
-                                        cat_stock_store      = stk_by_cat.loc[cat, store]
-                                        share = (row[store] / cat_total_sold_store) if cat_total_sold_store > 0 else 0
-                                        new_row[store] = round(cat_stock_store * share)
-                                else:
-                                    for store in _stk_store_cols:
-                                        new_row[store] = 0
-                                new_row["Total Stock"] = sum(new_row[s] for s in _stk_store_cols)
-                                stk_sub_rows.append(new_row)
-
-                            stk_sub_pivot = pd.DataFrame(stk_sub_rows).sort_values("Total Stock", ascending=False)
-                            st.caption(
-                                "Stock from location_stock.xlsx is at parent category level only — "
-                                "Sub Category split is an **estimate**, proportional to each "
-                                "sub-category's share of sales at that store"
-                            )
-                            st.dataframe(
-                                stk_sub_pivot[["Category","Sub Category"] + _stk_store_cols + ["Total Stock"]]
-                                .style.format({c: "{:,.0f}" for c in _stk_store_cols + ["Total Stock"]}),
-                                width='stretch', hide_index=True)
-                        else:
-                            st.caption("Stock from location_stock.xlsx — parent category level only")
-                            st.dataframe(
-                                stk_pivot[[c for c in ["Category"] + _stk_store_cols + ["Total Stock"]
-                                           if c in stk_pivot.columns]]
-                                .style.format({c: "{:,.0f}" for c in _stk_store_cols + ["Total Stock"]}),
-                                width='stretch', hide_index=True)
+                        st.caption(
+                            "Stock from location_stock.xlsx -- parent category level only. "
+                            "Re-run the updated fetch_location_stock.py for a real Sub Category breakdown."
+                        )
+                        st.dataframe(
+                            stk_pivot[[c for c in ["Category"] + _stk_store_cols + ["Total Stock"]
+                                       if c in stk_pivot.columns]]
+                            .style.format({c: "{:,.0f}" for c in _stk_store_cols + ["Total Stock"]}),
+                            width='stretch', hide_index=True)
 
             st.markdown(f"**Order ({cover_days}d) per Category per Store**")
             st.caption("Each category's total reorder qty split by that store's share of sales")
@@ -1689,43 +1753,37 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                 order_df_dl = pd.DataFrame(order_rows_dl)
 
                 stock_df_dl = None
-                if df_locstk is not None:
+                if df_locstk_sub is not None:
+                    # REAL per-sub-category stock -- no estimation.
+                    _lsk_sub_dl = df_locstk_sub.copy()
+                    if sel_cats:
+                        _lsk_sub_dl = _lsk_sub_dl[_lsk_sub_dl["Category"].isin(sel_cats)]
+                    if sel_subs:
+                        _lsk_sub_dl = _lsk_sub_dl[_lsk_sub_dl["Sub Category"].isin(sel_subs)]
+                    if not _lsk_sub_dl.empty:
+                        has_real_subcat_dl = _lsk_sub_dl["Sub Category"].astype(str).str.strip().ne("").any()
+                        index_cols_dl = ["Category", "Sub Category"] if has_real_subcat_dl else ["Category"]
+                        stock_df_dl = _lsk_sub_dl.pivot_table(
+                            index=index_cols_dl, columns="Store", values="Stock",
+                            aggfunc="sum", fill_value=0
+                        ).reset_index()
+                        stock_df_dl.columns.name = None
+                        _stk_cols_dl = [c for c in stores_dl if c in stock_df_dl.columns]
+                        stock_df_dl["Total"] = stock_df_dl[_stk_cols_dl].sum(axis=1)
+                elif df_locstk is not None:
+                    # Fallback: older location_stock.xlsx without the real
+                    # sub-category sheet -- parent category level only.
                     _lsk_dl = df_locstk.copy()
                     if sel_cats:
                         _lsk_dl = _lsk_dl[_lsk_dl["Category"].isin(sel_cats)]
                     if not _lsk_dl.empty:
-                        stk_dl = _lsk_dl.pivot_table(
+                        stock_df_dl = _lsk_dl.pivot_table(
                             index="Category", columns="Store", values="Stock",
                             aggfunc="sum", fill_value=0
                         ).reset_index()
-                        stk_dl.columns.name = None
-                        _stk_cols_dl = [c for c in stores_dl if c in stk_dl.columns]
-                        stk_dl["Total"] = stk_dl[_stk_cols_dl].sum(axis=1)
-
-                        has_subcat_dl = "Sub Category" in pivot_dl.columns and \
-                            pivot_dl["Sub Category"].astype(str).str.strip().ne("").any()
-
-                        if has_subcat_dl and _stk_cols_dl:
-                            cat_sales_totals_dl = pivot_dl.groupby("Category")[_stk_cols_dl].sum()
-                            stk_by_cat_dl = stk_dl.set_index("Category")
-                            stk_sub_rows_dl = []
-                            for _, row in pivot_dl.iterrows():
-                                cat = row["Category"]
-                                new_row = {"Category": cat, "Sub Category": row.get("Sub Category","")}
-                                if cat in stk_by_cat_dl.index and cat in cat_sales_totals_dl.index:
-                                    for store in _stk_cols_dl:
-                                        cat_total_sold = cat_sales_totals_dl.loc[cat, store]
-                                        cat_stock      = stk_by_cat_dl.loc[cat, store]
-                                        share = (row[store] / cat_total_sold) if cat_total_sold > 0 else 0
-                                        new_row[store] = round(cat_stock * share)
-                                else:
-                                    for store in _stk_cols_dl:
-                                        new_row[store] = 0
-                                new_row["Total"] = sum(new_row[s] for s in _stk_cols_dl)
-                                stk_sub_rows_dl.append(new_row)
-                            stock_df_dl = pd.DataFrame(stk_sub_rows_dl)
-                        else:
-                            stock_df_dl = stk_dl
+                        stock_df_dl.columns.name = None
+                        _stk_cols_dl = [c for c in stores_dl if c in stock_df_dl.columns]
+                        stock_df_dl["Total"] = stock_df_dl[_stk_cols_dl].sum(axis=1)
 
                 all_store_cols_combined = store_cols_dl.copy()
                 if stock_df_dl is not None:
