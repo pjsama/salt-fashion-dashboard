@@ -690,6 +690,40 @@ with st.sidebar:
         if sel_excluded_sale_periods:
             st.caption(f"Excluding: {', '.join(sel_excluded_sale_periods)}")
 
+    st.markdown("---")
+    st.markdown("**📅 Custom Velocity Period**")
+    use_custom_velocity_period = False
+    cvp_start = cvp_end = None
+    if df_daily_sales is None:
+        st.caption(
+            "⚠️ Not available — needs `daily_sales.xlsx` (same file as the Sale Period "
+            "Filter above). Without it, velocity always comes from the lookback slider."
+        )
+    else:
+        use_custom_velocity_period = st.checkbox(
+            "Compute velocity from a custom sales window instead",
+            value=False,
+            help=(
+                "Different from the 'Custom Range' Date filter below, which only "
+                "controls WHICH products appear (by launch date). This instead "
+                "overrides HOW velocity/Order Qty is calculated: units actually sold "
+                "within the window you pick here, divided by the number of days in "
+                "that window -- regardless of when each product launched or what "
+                "the lookback slider says."
+            )
+        )
+        if use_custom_velocity_period:
+            _today_default = pd.Timestamp.today().normalize()
+            _vcol1, _vcol2 = st.columns(2)
+            with _vcol1:
+                cvp_start = st.date_input("Sales from", value=_today_default - pd.Timedelta(days=90), key="cvp_start")
+            with _vcol2:
+                cvp_end = st.date_input("Sales to", value=_today_default, key="cvp_end")
+            if cvp_start and cvp_end and cvp_start > cvp_end:
+                st.error("'Sales from' date is after 'Sales to' date -- swap them.")
+            else:
+                st.caption(f"Velocity = units sold {cvp_start} to {cvp_end} ÷ that window's day count")
+
     if st.button("🔄 Refresh", use_container_width=True):
         st.cache_resource.clear(); st.rerun()
 
@@ -876,6 +910,41 @@ else:
     prod_sum["Vel_Tier"] = "—"
 
 prod_sum["Net_Sales"] = prod_sum["_vel_sales"] if has_recent else prod_sum["Total_Sold"]
+
+# ── Custom Velocity Period override (if active) ───────────────────────────────
+# Replaces whatever Daily_Velocity/Reorder_Velocity/Net_Sales the logic above
+# computed with real sales from the exact window the user picked, regardless
+# of the lookback slider, launch date, or any sale-period exclusion above --
+# this is a direct, explicit override of the velocity basis, not an
+# additional filter layered on top.
+_cvp_active = (use_custom_velocity_period and df_daily_sales is not None
+              and cvp_start and cvp_end and cvp_start <= cvp_end and "Variant_ID" in bdf.columns)
+if _cvp_active:
+    _cvp_start_ts = pd.Timestamp(cvp_start)
+    _cvp_end_ts   = pd.Timestamp(cvp_end)
+    _cvp_days     = (cvp_end - cvp_start).days + 1
+
+    _cvp_mask  = df_daily_sales["Date"].between(_cvp_start_ts, _cvp_end_ts)
+    _cvp_by_vid = df_daily_sales[_cvp_mask].groupby("Variant_ID")["Units Sold"].sum().to_dict()
+
+    _bdf_cvp = bdf[grp_cols + ["Variant_ID"]].copy()
+    _bdf_cvp["_cvp_sold"] = _bdf_cvp["Variant_ID"].map(_cvp_by_vid).fillna(0)
+    _cvp_agg = _bdf_cvp.groupby(grp_cols)["_cvp_sold"].sum().reset_index()
+
+    prod_sum = prod_sum.merge(_cvp_agg, on=grp_cols, how="left")
+    prod_sum["_cvp_sold"] = prod_sum["_cvp_sold"].fillna(0)
+
+    prod_sum["_vel_sales"]      = prod_sum["_cvp_sold"]
+    prod_sum["Daily_Velocity"]  = (prod_sum["_cvp_sold"] / _cvp_days).round(4)
+    prod_sum["Weekly_Rate"]     = (prod_sum["Daily_Velocity"] * 7).round(2)
+    prod_sum["Reorder_Velocity"] = (
+        prod_sum["Daily_Velocity"] * cover_days - prod_sum["Total_Stock"]
+    ).clip(lower=0).round().astype(int)
+    prod_sum["Net_Sales"]       = prod_sum["_cvp_sold"]
+    prod_sum["Vel_Tier"]        = "—"  # the trending/slowing/new tiers don't apply to a fixed historical window
+    _vel_window = _cvp_days
+    net_lbl = f"Net Sales ({cvp_start} to {cvp_end})"
+
 prod_sum["weeks_live"]  = (prod_sum["days_live"] / 7).clip(lower=1)
 prod_sum["Est_Value"]   = prod_sum["Reorder_Velocity"] * prod_sum["Avg_Price"]
 
@@ -984,7 +1053,8 @@ st.markdown(
 
 # ── KPIs ──────────────────────────────────────────────────────────────────────
 c1,c2,c3,c4,c5 = st.columns(5)
-net_lbl = f"Net Sales ({_vel_window}d)" if has_recent else "Total Sold (all-time)"
+if not _cvp_active:
+    net_lbl = f"Net Sales ({_vel_window}d)" if has_recent else "Total Sold (all-time)"
 for col, val, lbl, clr in [
     (c1, f"{n_products:,}",        "Products",                         "#374151"),
     (c2, f"{fast_count:,}",        "Fast / Super Fast",                "#16a34a"),
@@ -1021,7 +1091,7 @@ parent_cat_sum = prod_sum.groupby(["Category"]).agg(
     Est_Value     = ("Est_Value",       "sum"),
 ).reset_index().sort_values("Order_Vel", ascending=False)
 
-parent_cat_sum["Velocity_Day"] = (parent_cat_sum["Net_Sales"] / velocity_days).round(2)
+parent_cat_sum["Velocity_Day"] = (parent_cat_sum["Net_Sales"] / _vel_window).round(2)
 parent_cat_sum["Weekly_Rate"]  = (parent_cat_sum["Velocity_Day"] * 7).round(1)
 parent_cat_sum["Avg_STR"]      = parent_cat_sum["Avg_STR"].round(1)
 parent_cat_sum["Est_Value"]    = parent_cat_sum["Est_Value"].apply(fmt_npr)
@@ -1067,7 +1137,7 @@ cat_sum = prod_sum.groupby(cat_grp).agg(
     Est_Value     = ("Est_Value",       "sum"),
 ).reset_index().sort_values(["Category","Order_Vel"], ascending=[True,False])
 
-cat_sum["Velocity_Day"] = (cat_sum["Net_Sales"] / velocity_days).round(2)
+cat_sum["Velocity_Day"] = (cat_sum["Net_Sales"] / _vel_window).round(2)
 cat_sum["Weekly_Rate"]  = (cat_sum["Velocity_Day"] * 7).round(1)
 cat_sum["Avg_STR"]      = cat_sum["Avg_STR"].round(1)
 cat_sum["Est_Value"]    = cat_sum["Est_Value"].apply(fmt_npr)
