@@ -29,7 +29,7 @@ GDRIVE_PRODSTORE_ID = "10ZvRKu4icGDw_g95PplVVdKmj_m-Zpo4"
 GDRIVE_LOCSTK_ID    = "1zgTBhh7vOTjxEIz-LO3YSM-TXJeDUrBT"
 # Run daily_sales_export.py, upload the resulting file to Drive, then paste
 # its fileId here to enable the "Exclude Sale Periods" filter below.
-GDRIVE_DAILY_SALES_ID = "1E67HS9xYP3Jz9I8tH5FXid20UsKVIYbw"
+GDRIVE_DAILY_SALES_ID = ""
 
 # ── Known sale periods ─────────────────────────────────────────────────────────
 # Nov = 3-day Anniversary Sale. Jan/Aug = 5-day Winter/Summer Sales.
@@ -45,6 +45,10 @@ SALE_PERIODS = [
 
 LOCATION_ORDER = ["Baneshwor","Lazimpat","Kumaripati","Chitwan","Pokhara","Online",
                   "Baneshwor Lush","Chitwan Lush","Pokhara Lush"]
+# Separate from LOCATION_ORDER on purpose: Warehouse holds stock but doesn't
+# sell directly to customers, so it should appear in stock tables but stay
+# out of anything that splits reorder quantity by sales share.
+STOCK_LOCATION_ORDER = ["Main Warehouse"] + LOCATION_ORDER
 
 DEFAULT_EXCLUDED_STORES = {"Baneshwor Lush","Chitwan Lush","Pokhara Lush"}
 
@@ -1500,7 +1504,7 @@ else:
                         aggfunc="sum", fill_value=0
                     ).reset_index()
                     stk_sub_pivot.columns.name = None
-                    _stk_store_cols = [c for c in all_store_cols if c in stk_sub_pivot.columns]
+                    _stk_store_cols = [c for c in STOCK_LOCATION_ORDER if c in stk_sub_pivot.columns]
                     stk_sub_pivot["Total Stock"] = stk_sub_pivot[_stk_store_cols].sum(axis=1)
                     stk_sub_pivot = stk_sub_pivot.sort_values("Total Stock", ascending=False)
 
@@ -1527,7 +1531,7 @@ else:
                         aggfunc="sum", fill_value=0
                     ).reset_index()
                     stk_pivot.columns.name = None
-                    _stk_store_cols = [c for c in all_store_cols if c in stk_pivot.columns]
+                    _stk_store_cols = [c for c in STOCK_LOCATION_ORDER if c in stk_pivot.columns]
                     stk_pivot["Total Stock"] = stk_pivot[_stk_store_cols].sum(axis=1)
                     stk_pivot = stk_pivot.sort_values("Total Stock", ascending=False)
 
@@ -1768,7 +1772,7 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                             aggfunc="sum", fill_value=0
                         ).reset_index()
                         stock_df_dl.columns.name = None
-                        _stk_cols_dl = [c for c in stores_dl if c in stock_df_dl.columns]
+                        _stk_cols_dl = [c for c in STOCK_LOCATION_ORDER if c in stock_df_dl.columns]
                         stock_df_dl["Total"] = stock_df_dl[_stk_cols_dl].sum(axis=1)
                 elif df_locstk is not None:
                     # Fallback: older location_stock.xlsx without the real
@@ -1782,7 +1786,7 @@ with pd.ExcelWriter(out, engine="openpyxl") as writer:
                             aggfunc="sum", fill_value=0
                         ).reset_index()
                         stock_df_dl.columns.name = None
-                        _stk_cols_dl = [c for c in stores_dl if c in stock_df_dl.columns]
+                        _stk_cols_dl = [c for c in STOCK_LOCATION_ORDER if c in stock_df_dl.columns]
                         stock_df_dl["Total"] = stock_df_dl[_stk_cols_dl].sum(axis=1)
 
                 all_store_cols_combined = store_cols_dl.copy()
