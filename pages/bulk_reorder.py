@@ -27,6 +27,21 @@ GDRIVE_MAIN_ID      = "1kIHUlGCallLjXe9tiBrYDQ16ElQDmLR3"
 GDRIVE_VARIANT_ID   = "1LPeoGXDDd3ZAppTiuLskzY4q-71CJWfJ"
 GDRIVE_PRODSTORE_ID = "10ZvRKu4icGDw_g95PplVVdKmj_m-Zpo4"
 GDRIVE_LOCSTK_ID    = "1zgTBhh7vOTjxEIz-LO3YSM-TXJeDUrBT"
+# Run daily_sales_export.py, upload the resulting file to Drive, then paste
+# its fileId here to enable the "Exclude Sale Periods" filter below.
+GDRIVE_DAILY_SALES_ID = "1E67HS9xYP3Jz9I8tH5FXid20UsKVIYbw"
+
+# ── Known sale periods ─────────────────────────────────────────────────────────
+# Nov = 3-day Anniversary Sale. Jan/Aug = 5-day Winter/Summer Sales.
+# Add future sales here as they're confirmed -- nothing else needs to change.
+SALE_PERIODS = [
+    {"name": "Nov 2024 Anniversary Sale", "start": "2024-11-13", "end": "2024-11-15"},
+    {"name": "Jan 2025 Winter Sale",      "start": "2025-01-21", "end": "2025-01-25"},
+    {"name": "Aug 2025 Summer Sale",      "start": "2025-08-13", "end": "2025-08-17"},
+    {"name": "Nov 2025 Anniversary Sale", "start": "2025-11-13", "end": "2025-11-15"},
+    {"name": "Jan 2026 Winter Sale",      "start": "2026-01-13", "end": "2026-01-17"},
+    {"name": "Aug 2026 Summer Sale",      "start": "2026-08-13", "end": "2026-08-17"},
+]
 
 LOCATION_ORDER = ["Baneshwor","Lazimpat","Kumaripati","Chitwan","Pokhara","Online",
                   "Baneshwor Lush","Chitwan Lush","Pokhara Lush"]
@@ -387,12 +402,80 @@ def load_location_stock():
     return out
 
 
+@st.cache_resource(show_spinner=False)
+def load_daily_sales():
+    """Loads daily_sales.xlsx (from daily_sales_export.py) -- one row
+    per (Variant_ID, Date) with units sold that day. Used only by the
+    'Exclude Sale Periods' filter; everything else in the dashboard
+    works fine without this file."""
+    buf = _gdrive(GDRIVE_DAILY_SALES_ID) if GDRIVE_DAILY_SALES_ID else None
+    df = None
+    if buf:
+        try: df = pd.read_excel(buf, sheet_name="Daily Sales", engine="openpyxl")
+        except: pass
+    if df is None:
+        base = r"C:\Users\Legion\Desktop\odoo_export"
+        for d in [base, base + r"\exports"]:
+            p = Path(d) / "daily_sales.xlsx"
+            if p.exists():
+                try:
+                    df = pd.read_excel(p, sheet_name="Daily Sales", engine="openpyxl")
+                    break
+                except: pass
+    if df is None or df.empty:
+        return None
+    df.columns = [str(c).strip() for c in df.columns]
+    if not {"Variant_ID", "Date", "Units Sold"}.issubset(df.columns):
+        return None
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df["Units Sold"] = pd.to_numeric(df["Units Sold"], errors="coerce").fillna(0)
+    df = df.dropna(subset=["Date"])
+    return df
+
+
+def compute_sale_period_exclusions(daily_df, excluded_names, today, velocity_windows):
+    """For each Variant_ID, returns how many units were sold during the
+    selected sale period(s) -- both all-time, and separately for each
+    rolling lookback window (30/60/90/180d) that the excluded window
+    actually overlaps with. A sale window only affects a given lookback
+    if it falls within that many days of today; e.g. Aug 13-17, 2026 is
+    ~41-45 days before Sep 27, 2026, so it overlaps the 60d/90d/180d
+    windows but NOT the 30d window.
+
+    Returns: ({vid: total_excluded}, {days: {vid: excluded_in_window}})
+    """
+    if daily_df is None or not excluded_names:
+        return {}, {d: {} for d in velocity_windows}
+
+    periods = [p for p in SALE_PERIODS if p["name"] in excluded_names]
+    if not periods:
+        return {}, {d: {} for d in velocity_windows}
+
+    mask = pd.Series(False, index=daily_df.index)
+    for p in periods:
+        start = pd.Timestamp(p["start"])
+        end   = pd.Timestamp(p["end"])
+        mask = mask | daily_df["Date"].between(start, end)
+    excluded_rows = daily_df[mask]
+
+    total_excluded = excluded_rows.groupby("Variant_ID")["Units Sold"].sum().to_dict()
+
+    window_excluded = {}
+    for days in velocity_windows:
+        cutoff = today - pd.Timedelta(days=days)
+        in_window = excluded_rows[excluded_rows["Date"] >= cutoff]
+        window_excluded[days] = in_window.groupby("Variant_ID")["Units Sold"].sum().to_dict()
+
+    return total_excluded, window_excluded
+
+
 # ── Load ──────────────────────────────────────────────────────────────────────
 with st.spinner("Loading data…"):
     df_prod           = load_products()
     size_df, color_df = load_variants()
     df_prodstore      = load_product_store()
     df_locstk         = load_location_stock()
+    df_daily_sales     = load_daily_sales()
 
 if df_prod is None:
     st.error("Could not load product data."); st.stop()
@@ -520,6 +603,32 @@ with st.sidebar:
     sel_date = st.selectbox("Date filter", date_opts, index=0,
         help="'Older than X' excludes new arrivals that haven't had time to sell")
 
+    st.markdown("---")
+    st.markdown("**🏷️ Sale Period Filter**")
+    if df_daily_sales is None:
+        sel_excluded_sale_periods = []
+        st.caption(
+            "⚠️ Not available — needs `daily_sales.xlsx` (run `daily_sales_export.py`, "
+            "upload to Drive, paste the fileId into `GDRIVE_DAILY_SALES_ID`). Without it, "
+            "sale-period sales are included in every number above like normal."
+        )
+    else:
+        sel_excluded_sale_periods = st.multiselect(
+            "Exclude sale periods from sales/velocity",
+            [p["name"] for p in SALE_PERIODS],
+            default=[],
+            help=(
+                "Strips out units sold during the selected sale window(s) from "
+                "Total Units Sold and every Recent Sold Nd column before velocity "
+                "and reorder quantities are calculated -- so a deep-discount spike "
+                "doesn't inflate the reorder plan for everyday full-price demand. "
+                "A sale window only affects a lookback (30/60/90/180d) that it "
+                "actually falls inside; older sales only affect the all-time total."
+            )
+        )
+        if sel_excluded_sale_periods:
+            st.caption(f"Excluding: {', '.join(sel_excluded_sale_periods)}")
+
     if st.button("🔄 Refresh", use_container_width=True):
         st.cache_resource.clear(); st.rerun()
 
@@ -546,6 +655,33 @@ if sel_date != "All time" and "Create Date" in bdf.columns:
     elif "Older than 30" in sel_date:    bdf = bdf[cd < today - pd.Timedelta(days=30)]
     elif "Older than 60" in sel_date:    bdf = bdf[cd < today - pd.Timedelta(days=60)]
     elif "Older than 90" in sel_date:    bdf = bdf[cd < today - pd.Timedelta(days=90)]
+
+# ── Apply sale-period exclusion (if selected) ─────────────────────────────────
+# Subtracts sale-window units directly from bdf's own sales columns, BEFORE
+# the groupby below -- so every downstream number (Total_Sold, velocity,
+# Reorder_Velocity, category summaries, size/color splits) is consistent
+# with the exclusion rather than needing separate adjustment logic in each
+# section further down.
+if sel_excluded_sale_periods and df_daily_sales is not None and "Variant_ID" in bdf.columns:
+    _recent_windows = [d for d in (30, 60, 90, 180) if f"Recent Sold {d}d" in bdf.columns]
+    _total_excl, _window_excl = compute_sale_period_exclusions(
+        df_daily_sales, sel_excluded_sale_periods, today, _recent_windows)
+
+    if "Total Units Sold" in bdf.columns:
+        _excl_series = bdf["Variant_ID"].map(_total_excl).fillna(0)
+        bdf["Total Units Sold"] = (bdf["Total Units Sold"] - _excl_series).clip(lower=0)
+
+    for _d in _recent_windows:
+        _col = f"Recent Sold {_d}d"
+        _excl_series = bdf["Variant_ID"].map(_window_excl.get(_d, {})).fillna(0)
+        bdf[_col] = (bdf[_col] - _excl_series).clip(lower=0)
+
+    _n_affected = sum(1 for v in _total_excl.values() if v > 0)
+    if _n_affected:
+        st.caption(
+            f"🏷️ Sale period exclusion active: {', '.join(sel_excluded_sale_periods)} "
+            f"— {_n_affected:,} variant(s) adjusted."
+        )
 
 # ── Build product-level summary ───────────────────────────────────────────────
 grp_cols = ["Product Name","Brand","Category"]
