@@ -109,6 +109,41 @@ def _gdrive(file_id):
         buf.seek(0); return buf
     except: return None
 
+def _gdrive_with_error(file_id):
+    """Same download as _gdrive, but returns (buffer, error_text) so a failure
+    can be shown instead of silently becoming None. Also falls back to a Sheets
+    -> .xlsx export, because get_media() is rejected for native Google Sheets."""
+    try:
+        from google.oauth2.service_account import Credentials
+        import googleapiclient.discovery
+        from googleapiclient.http import MediaIoBaseDownload
+        import json as _j
+        creds = Credentials.from_service_account_info(
+            _j.loads(_j.dumps(dict(st.secrets["gcp_service_account"]))),
+            scopes=["https://www.googleapis.com/auth/drive"])
+        svc = googleapiclient.discovery.build("drive", "v3", credentials=creds)
+    except Exception as e:
+        return None, f"could not authenticate with Google Drive ({type(e).__name__}: {str(e)[:200]})"
+
+    def _download(request):
+        buf = BytesIO()
+        dl = MediaIoBaseDownload(buf, request)
+        done = False
+        while not done: _, done = dl.next_chunk()
+        buf.seek(0)
+        return buf
+
+    try:
+        return _download(svc.files().get_media(fileId=file_id)), None
+    except Exception as e_media:
+        try:
+            return _download(svc.files().export_media(
+                fileId=file_id,
+                mimeType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")), None
+        except Exception as e_export:
+            return None, (f"download failed ({type(e_media).__name__}: {str(e_media)[:200]}); "
+                          f"export fallback also failed ({type(e_export).__name__}: {str(e_export)[:120]})")
+
 @st.cache_resource(show_spinner=False)
 def load_products():
     buf = _gdrive(GDRIVE_MAIN_ID)
@@ -449,35 +484,71 @@ def load_location_stock_subcategory():
     return out
 
 
+REQUIRED_DAILY_COLS = {"Variant_ID", "Date", "Units Sold"}
+
+
+def _parse_daily_sales_xlsx(source):
+    """Returns (df, problem). Uses the 'Daily Sales' sheet if present, otherwise
+    the first sheet, as long as it has the three required columns."""
+    try:
+        xl = pd.ExcelFile(source, engine="openpyxl")
+        sheet = "Daily Sales" if "Daily Sales" in xl.sheet_names else xl.sheet_names[0]
+        df = xl.parse(sheet)
+    except Exception as e:
+        return None, f"file could not be read as Excel ({type(e).__name__}: {str(e)[:200]})"
+    df.columns = [str(c).strip() for c in df.columns]
+    if not REQUIRED_DAILY_COLS.issubset(df.columns):
+        return None, (f"sheet '{sheet}' has columns {list(df.columns)[:8]} -- "
+                      f"needs Variant_ID, Date, Units Sold")
+    return df, None
+
+
 @st.cache_resource(show_spinner=False)
-def load_daily_sales():
-    """Loads daily_sales.xlsx (from daily_sales_export.py) -- one row
-    per (Variant_ID, Date) with units sold that day. Used only by the
-    'Exclude Sale Periods' filter; everything else in the dashboard
-    works fine without this file."""
-    buf = _gdrive(GDRIVE_DAILY_SALES_ID) if GDRIVE_DAILY_SALES_ID else None
+def _load_daily_sales_cached(file_id):
+    """Raises (rather than returning None) on failure. Streamlit does not cache
+    exceptions, so a failed load is retried on the next run instead of being
+    stuck as a cached None. file_id is an argument so changing it busts the cache."""
+    problems = []
     df = None
-    if buf:
-        try: df = pd.read_excel(buf, sheet_name="Daily Sales", engine="openpyxl")
-        except: pass
+
+    if file_id:
+        buf, err = _gdrive_with_error(file_id)
+        if buf is None:
+            problems.append(f"Drive: {err}")
+        else:
+            df, prob = _parse_daily_sales_xlsx(buf)
+            if prob: problems.append(f"Drive file: {prob}")
+    else:
+        problems.append("GDRIVE_DAILY_SALES_ID is empty")
+
     if df is None:
         base = r"C:\Users\Legion\Desktop\odoo_export"
         for d in [base, base + r"\exports"]:
             p = Path(d) / "daily_sales.xlsx"
             if p.exists():
-                try:
-                    df = pd.read_excel(p, sheet_name="Daily Sales", engine="openpyxl")
-                    break
-                except: pass
-    if df is None or df.empty:
-        return None
-    df.columns = [str(c).strip() for c in df.columns]
-    if not {"Variant_ID", "Date", "Units Sold"}.issubset(df.columns):
-        return None
+                df, prob = _parse_daily_sales_xlsx(p)
+                if prob: problems.append(f"local {p}: {prob}")
+                if df is not None: break
+
+    if df is None:
+        raise RuntimeError("; ".join(problems) or "no daily sales data found")
+    if df.empty:
+        raise RuntimeError("daily sales file loaded but has no rows")
+
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df["Units Sold"] = pd.to_numeric(df["Units Sold"], errors="coerce").fillna(0)
     df = df.dropna(subset=["Date"])
+    if df.empty:
+        raise RuntimeError("daily sales file loaded but no row has a valid Date")
     return df
+
+
+def load_daily_sales():
+    """Returns (df, None) on success or (None, reason) on failure."""
+    try:
+        return _load_daily_sales_cached(GDRIVE_DAILY_SALES_ID), None
+    except Exception as e:
+        return None, str(e)
 
 
 def compute_sale_period_exclusions(daily_df, excluded_names, today, velocity_windows):
@@ -523,7 +594,7 @@ with st.spinner("Loading data…"):
     df_prodstore      = load_product_store()
     df_locstk         = load_location_stock()
     df_locstk_sub     = load_location_stock_subcategory()
-    df_daily_sales     = load_daily_sales()
+    df_daily_sales, _daily_sales_err = load_daily_sales()
 
 if df_prod is None:
     st.error("Could not load product data."); st.stop()
@@ -669,9 +740,11 @@ with st.sidebar:
     if df_daily_sales is None:
         sel_excluded_sale_periods = []
         st.caption(
-            "⚠️ Not available — needs `daily_sales.xlsx` (run `daily_sales_export.py`, "
-            "upload to Drive, paste the fileId into `GDRIVE_DAILY_SALES_ID`). Without it, "
-            "sale-period sales are included in every number above like normal."
+            "⚠️ Not available — `daily_sales.xlsx` could not be loaded. "
+            f"**Reason:** {_daily_sales_err} "
+            "(If this mentions 404/403/notFound, share the Drive file with the service "
+            "account's `client_email`. Click 🔄 Refresh after fixing.) "
+            "Without it, sale-period sales are included in every number like normal."
         )
     else:
         sel_excluded_sale_periods = st.multiselect(
@@ -696,8 +769,9 @@ with st.sidebar:
     cvp_start = cvp_end = None
     if df_daily_sales is None:
         st.caption(
-            "⚠️ Not available — needs `daily_sales.xlsx` (same file as the Sale Period "
-            "Filter above). Without it, velocity always comes from the lookback slider."
+            "⚠️ Not available — same `daily_sales.xlsx` as the Sale Period Filter above "
+            f"couldn't be loaded ({_daily_sales_err}). Without it, velocity always "
+            "comes from the lookback slider."
         )
     else:
         use_custom_velocity_period = st.checkbox(
