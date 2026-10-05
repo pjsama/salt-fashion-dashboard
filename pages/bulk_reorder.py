@@ -29,7 +29,7 @@ GDRIVE_PRODSTORE_ID = "10ZvRKu4icGDw_g95PplVVdKmj_m-Zpo4"
 GDRIVE_LOCSTK_ID    = "1zgTBhh7vOTjxEIz-LO3YSM-TXJeDUrBT"
 # Run daily_sales_export.py, upload the resulting file to Drive, then paste
 # its fileId here to enable the "Exclude Sale Periods" filter below.
-GDRIVE_DAILY_SALES_ID = "1E67HS9xYP3Jz9I8tH5FXid20UsKVIYbw"
+GDRIVE_DAILY_SALES_ID = "1irStON3Sl7IrI4I876DVSOTLjgJoGT3Y"
 
 # ── Known sale periods ─────────────────────────────────────────────────────────
 # Nov = 3-day Anniversary Sale. Jan/Aug = 5-day Winter/Summer Sales.
